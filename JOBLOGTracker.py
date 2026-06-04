@@ -1,8 +1,9 @@
 import csv
 import re
 import sys
+import threading
 import zipfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from xml.sax.saxutils import escape
 
 import pyodbc
@@ -115,7 +116,28 @@ INNER_SEW_OPTIONS = ["4", "6", "7", "9", "10", "11", "13", "14", "15"]
 OUTER_SEW_OPTIONS = ["5", "6", "7", "9", "10", "11", "13", "14", "15"]
 EXTRUSION_OPTIONS = ["NR", "1", "3", "12", "14", "15"]
 INSPECTION_OPTIONS = ["1", "2", "12", "14", "15"]
-
+ACTIVE_JOBTRACKING_FILTER = """
+    NOT EXISTS (
+        SELECT 1
+        FROM dbo.JobTracking jt
+        WHERE jt.JobNumber = CONVERT(nvarchar(50), j.JobNumber)
+          AND jt.Operation = 'Special Apps'
+          AND jt.EventType = 'Complete'
+    )
+"""
+CUSTOMER_MAP = {
+    "ITI CEDAR CITY UTAH": "CD/UT",
+    "Florida Wetout Branch": "OCA/FL",
+    "Alabama Wetout Branch": "SC/BES",
+    "ITI NEW YORK WETOUT": "TAPPAN/NY",
+    "ITI INDIANA WETOUT BRANCH": "IN/IND",
+    "WETOUT ITI": "ITI/VT",
+    "PACIFIC BRANCH PLANT": "ITI/CA",
+    "INSITUFORM TECHNOLOGIES LLC": "SLC/UT",
+    "INSITUFORM TECHNOLOGIES-CANADA WEST": "ITI/EDM",
+    "INSITUFORM TECHNOLOGIES LIMITED": "ITI/MON",
+    "MTC Branch Plant": "MTC/PR",
+}
 
 NAV_DARK = "#07182C"
 NAV_MID = "#0A3A66"
@@ -183,6 +205,35 @@ QLineEdit, QComboBox, QDateEdit {{
     padding: 6px 10px;
     color: {TEXT_DARK};
 }}
+QComboBox::drop-down, QDateEdit::drop-down {{
+    border: 0;
+    width: 24px;
+}}
+QCalendarWidget QWidget {{
+    background-color: white;
+    color: {TEXT_DARK};
+}}
+QCalendarWidget QAbstractItemView {{
+    background-color: white;
+    color: {TEXT_DARK};
+    selection-background-color: {ACCENT};
+    selection-color: white;
+}}
+QCalendarWidget QToolButton {{
+    background: white;
+    color: {TEXT_DARK};
+    border: 1px solid rgba(78,119,163,130);
+    border-radius: 6px;
+    padding: 5px 8px;
+}}
+QCalendarWidget QMenu {{
+    background-color: white;
+    color: {TEXT_DARK};
+}}
+QCheckBox {{
+    color: {TEXT_DARK};
+    spacing: 8px;
+}}
 QPushButton {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 rgba(255,255,255,220), stop:0.52 rgba(224,236,248,195), stop:1 rgba(192,212,232,190));
@@ -205,11 +256,15 @@ QPushButton[accent="true"] {{
 }}
 QTableView {{
     background: rgba(255,255,255,235);
+    alternate-background-color: #F3F7FB;
     border: 1px solid rgba(105,135,168,150);
     border-radius: 8px;
     gridline-color: rgba(135,160,190,120);
     selection-background-color: #E8650A;
     selection-color: white;
+}}
+QTableView::item {{
+    padding: 5px 8px;
 }}
 QHeaderView::section {{
     background: #0C3157;
@@ -220,6 +275,31 @@ QHeaderView::section {{
     font-weight: 800;
 }}
 """
+
+def app_date_text(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        return value.strftime("%m-%d-%Y")
+
+    if isinstance(value, date):
+        return value.strftime("%m-%d-%Y")
+
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").strftime("%m-%d-%Y")
+        except ValueError:
+            pass
+
+    return str(value)
+
+
+def configure_date_edit(item, days_from_today=0):
+    item.setCalendarPopup(True)
+    item.setDisplayFormat("MM-dd-yyyy")
+    item.setDate(QDate.currentDate().addDays(days_from_today))
+    return item
 
 
 def connection_string(config):
@@ -399,6 +479,10 @@ class TablePanel(QWidget):
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.search = QLineEdit()
@@ -423,7 +507,7 @@ class TablePanel(QWidget):
         for row in rows:
             items = []
             for cell in row:
-                text = "" if cell is None else str(cell)
+                text = app_date_text(cell)
                 item = QStandardItem(text)
                 item.setEditable(False)
                 items.append(item)
@@ -541,14 +625,8 @@ class JoblogPage(Page):
         super().__init__(app, "View Joblog")
         self.panel = TablePanel("View Joblog")
         self.use_date_filter = QCheckBox("Use Date Range")
-        self.start_date = QDateEdit()
-        self.start_date.setCalendarPopup(True)
-        self.start_date.setDisplayFormat("yyyy-MM-dd")
-        self.start_date.setDate(QDate.currentDate().addDays(-30))
-        self.end_date = QDateEdit()
-        self.end_date.setCalendarPopup(True)
-        self.end_date.setDisplayFormat("yyyy-MM-dd")
-        self.end_date.setDate(QDate.currentDate().addDays(90))
+        self.start_date = configure_date_edit(QDateEdit(), -30)
+        self.end_date = configure_date_edit(QDateEdit(), 90)
         refresh = button("Refresh", True)
         refresh.clicked.connect(self.refresh)
         filters = glass_frame()
@@ -566,24 +644,26 @@ class JoblogPage(Page):
 
     def refresh(self):
         try:
-            self.app.pull_joblog_if_due()
+            self.app.start_background_joblog_pull()
             with adhoc_connect() as conn:
                 sql = """
                     SELECT PalletNumber, JobNumber, Customer, Diameter, Thickness, Length,
-                           SP_APP, [DESC], RUSH, PullBelt
-                    FROM dbo.vw_JOBLOG_Open
+                           ShipBy, SP_APP, [DESC], RUSH, PullBelt
+                    FROM dbo.vw_JOBLOG_Open j
                 """
                 params = []
+                filters = [ACTIVE_JOBTRACKING_FILTER]
                 if self.use_date_filter.isChecked():
-                    sql += " WHERE ShipBy >= ? AND ShipBy <= ?"
+                    filters.append("ShipBy >= ? AND ShipBy <= ?")
                     params.extend([
                         self.start_date.date().toString("yyyy-MM-dd"),
                         self.end_date.date().toString("yyyy-MM-dd"),
                     ])
+                sql += " WHERE " + " AND ".join(filters)
                 sql += " ORDER BY PalletNumber, JobNumber"
                 rows = conn.cursor().execute(sql, *params).fetchall()
             self.panel.set_rows(
-                ["Pallet #", "Job #", "Customer", "Diameter", "Thickness", "Length", "SP APP", "DESC", "Rush", "Pull Belt"],
+                ["Pallet #", "Job #", "Customer", "Diameter", "Thickness", "Length", "ShipBy", "SP APP", "DESC", "Rush", "Pull Belt"],
                 rows,
             )
         except Exception as exc:
@@ -597,6 +677,10 @@ class AssignLinePage(Page):
         self.table = QTableView()
         self.model = QStandardItemModel()
         self.table.setModel(self.model)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(36)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         save = button("Save", True)
         save.clicked.connect(self.save)
@@ -615,38 +699,40 @@ class AssignLinePage(Page):
             with adhoc_connect() as conn:
                 rows = conn.cursor().execute(
                     """
-                    SELECT j.JobNumber, j.Diameter, j.Thickness, j.Length
+                    SELECT j.PalletNumber, j.JobNumber, j.Diameter, j.Thickness, j.Length
                     FROM dbo.JOBLOG j
                     LEFT JOIN dbo.JobEntry_MFGLine m ON m.JobNumber = j.JobNumber
                     WHERE j.Date_Completed IS NULL AND m.JobNumber IS NULL
+                      AND (j.PalletNumber = 'Stock' OR j.ShipBy >= DATEADD(day, -7, CAST(GETDATE() AS date)))
+                      AND """ + ACTIVE_JOBTRACKING_FILTER + """
                     ORDER BY j.JobNumber
                     """
                 ).fetchall()
             self.rows = rows
             self.model.clear()
             self.model.setHorizontalHeaderLabels(
-                ["Job #", "Diameter", "Thickness", "Length", "Inner Join", "Outer Join", "Inner Sew", "Outer Sew", "Extrusion", "Inspection"]
+                ["Pallet #", "Job #", "Diameter", "Thickness", "Length", "Inner Join", "Outer Join", "Inner Sew", "Outer Sew", "Extrusion", "Inspection"]
             )
             for row in rows:
-                values = [row.JobNumber, row.Diameter, row.Thickness, row.Length]
+                values = [row.PalletNumber, row.JobNumber, row.Diameter, row.Thickness, row.Length]
                 items = [QStandardItem("" if item is None else str(item)) for item in values]
                 for item in items:
                     item.setEditable(False)
                 self.model.appendRow(items + [QStandardItem("") for _ in range(6)])
                 view_row = self.model.rowCount() - 1
                 auto_nr = as_int_or_none(row.Diameter) is not None and as_int_or_none(row.Diameter) < 40
-                self.add_combo(view_row, 4, JOIN_LINE_OPTIONS, "NR" if auto_nr else "13")
-                self.add_combo(view_row, 5, JOIN_LINE_OPTIONS, "NR" if auto_nr else "13")
-                self.add_combo(view_row, 6, INNER_SEW_OPTIONS, INNER_SEW_OPTIONS[0])
-                self.add_combo(view_row, 7, OUTER_SEW_OPTIONS, OUTER_SEW_OPTIONS[0])
-                self.add_combo(view_row, 8, EXTRUSION_OPTIONS, "NR" if auto_nr else "1")
-                self.add_combo(view_row, 9, INSPECTION_OPTIONS, INSPECTION_OPTIONS[0])
+                self.add_combo(view_row, 5, JOIN_LINE_OPTIONS, "NR" if auto_nr else "")
+                self.add_combo(view_row, 6, JOIN_LINE_OPTIONS, "NR" if auto_nr else "")
+                self.add_combo(view_row, 7, INNER_SEW_OPTIONS, "")
+                self.add_combo(view_row, 8, OUTER_SEW_OPTIONS, "")
+                self.add_combo(view_row, 9, EXTRUSION_OPTIONS, "NR" if auto_nr else "")
+                self.add_combo(view_row, 10, INSPECTION_OPTIONS, "")
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Could not load unassigned jobs.\n\n{exc}")
 
     def add_combo(self, row, col, options, current):
         combo = QComboBox()
-        combo.addItems(options)
+        combo.addItems([""] + [item for item in options if item])
         combo.setCurrentText(current)
         self.table.setIndexWidget(self.model.index(row, col), combo)
 
@@ -659,7 +745,7 @@ class AssignLinePage(Page):
             with adhoc_connect() as conn:
                 cur = conn.cursor()
                 for row in range(self.model.rowCount()):
-                    job_number = as_int_or_none(self.model.item(row, 0).text())
+                    job_number = as_int_or_none(self.model.item(row, 1).text())
                     cur.execute(
                         """
                         INSERT INTO dbo.JobEntry_MFGLine
@@ -667,12 +753,12 @@ class AssignLinePage(Page):
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         job_number,
-                        as_int_or_none(self.combo_value(row, 4)),
                         as_int_or_none(self.combo_value(row, 5)),
                         as_int_or_none(self.combo_value(row, 6)),
                         as_int_or_none(self.combo_value(row, 7)),
                         as_int_or_none(self.combo_value(row, 8)),
                         as_int_or_none(self.combo_value(row, 9)),
+                        as_int_or_none(self.combo_value(row, 10)),
                     )
                 conn.commit()
             QMessageBox.information(self, APP_TITLE, "Line assignments saved.")
@@ -683,34 +769,99 @@ class AssignLinePage(Page):
 
 class AssignedLinesPage(Page):
     def __init__(self, app):
-        super().__init__(app, "View Assigned Production Lines")
-        self.panel = TablePanel("View Assigned Production Lines")
+        super().__init__(app, "View/Update Assigned Production Lines")
+        self.table = QTableView()
+        self.model = QStandardItemModel()
+        self.table.setModel(self.model)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(36)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         refresh = button("Refresh", True)
         refresh.clicked.connect(self.refresh)
+        save = button("Save Changes", True)
+        save.clicked.connect(self.save)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        actions.addWidget(refresh)
+        actions.addWidget(save)
         layout = QVBoxLayout(self)
-        layout.addWidget(refresh, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(self.panel)
+        layout.addLayout(actions)
+        layout.addWidget(self.table)
 
     def refresh(self):
         try:
             with adhoc_connect() as conn:
                 rows = conn.cursor().execute(
                     """
-                    SELECT j.JobNumber, j.Diameter, j.Thickness, j.Length,
+                    SELECT j.PalletNumber, j.JobNumber, j.Diameter, j.Thickness, j.Length,
                            m.InnerJoinMFG, m.OuterJoinMFG, m.InnerSewMFG, m.OuterSewMFG,
                            m.ExtrusionMFG, m.InspectionMFG
                     FROM dbo.JOBLOG j
                     INNER JOIN dbo.JobEntry_MFGLine m ON m.JobNumber = j.JobNumber
                     WHERE j.Date_Completed IS NULL
+                      AND (j.PalletNumber = 'Stock' OR j.ShipBy >= DATEADD(day, -7, CAST(GETDATE() AS date)))
+                      AND """ + ACTIVE_JOBTRACKING_FILTER + """
                     ORDER BY j.JobNumber
                     """
                 ).fetchall()
-            self.panel.set_rows(
-                ["Job #", "Diameter", "Thickness", "Length", "Inner Join", "Outer Join", "Inner Sew", "Outer Sew", "Extrusion", "Inspection"],
-                rows,
+            self.model.clear()
+            self.model.setHorizontalHeaderLabels(
+                ["Pallet #", "Job #", "Diameter", "Thickness", "Length", "Inner Join", "Outer Join", "Inner Sew", "Outer Sew", "Extrusion", "Inspection"]
             )
+            for row in rows:
+                values = [row.PalletNumber, row.JobNumber, row.Diameter, row.Thickness, row.Length]
+                items = [QStandardItem(app_date_text(item)) for item in values]
+                for item in items:
+                    item.setEditable(False)
+                self.model.appendRow(items + [QStandardItem("") for _ in range(6)])
+                view_row = self.model.rowCount() - 1
+                self.add_combo(view_row, 5, JOIN_LINE_OPTIONS, row.InnerJoinMFG)
+                self.add_combo(view_row, 6, JOIN_LINE_OPTIONS, row.OuterJoinMFG)
+                self.add_combo(view_row, 7, INNER_SEW_OPTIONS, row.InnerSewMFG)
+                self.add_combo(view_row, 8, OUTER_SEW_OPTIONS, row.OuterSewMFG)
+                self.add_combo(view_row, 9, EXTRUSION_OPTIONS, row.ExtrusionMFG)
+                self.add_combo(view_row, 10, INSPECTION_OPTIONS, row.InspectionMFG)
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Could not load assigned lines.\n\n{exc}")
+
+    def add_combo(self, row, col, options, current):
+        combo = QComboBox()
+        combo.addItems([""] + [str(item) for item in options if str(item)])
+        combo.setCurrentText("" if current is None else str(current))
+        self.table.setIndexWidget(self.model.index(row, col), combo)
+
+    def combo_value(self, row, col):
+        widget = self.table.indexWidget(self.model.index(row, col))
+        return widget.currentText() if widget else None
+
+    def save(self):
+        try:
+            with adhoc_connect() as conn:
+                cur = conn.cursor()
+                for row in range(self.model.rowCount()):
+                    job_number = as_int_or_none(self.model.item(row, 1).text())
+                    cur.execute(
+                        """
+                        UPDATE dbo.JobEntry_MFGLine
+                        SET InnerJoinMFG = ?, OuterJoinMFG = ?, InnerSewMFG = ?,
+                            OuterSewMFG = ?, ExtrusionMFG = ?, InspectionMFG = ?
+                        WHERE JobNumber = ?
+                        """,
+                        as_int_or_none(self.combo_value(row, 5)),
+                        as_int_or_none(self.combo_value(row, 6)),
+                        as_int_or_none(self.combo_value(row, 7)),
+                        as_int_or_none(self.combo_value(row, 8)),
+                        as_int_or_none(self.combo_value(row, 9)),
+                        as_int_or_none(self.combo_value(row, 10)),
+                        job_number,
+                    )
+                conn.commit()
+            QMessageBox.information(self, APP_TITLE, "Assigned production lines updated.")
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Could not update assigned lines.\n\n{exc}")
 
 
 class UpdateLocationPage(Page):
@@ -807,27 +958,35 @@ class UpdateLocationPage(Page):
 
 class HeadcountPage(Page):
     def __init__(self, app):
-        super().__init__(app, "View Current Headcount")
-        self.panel = TablePanel("View Current Headcount")
+        super().__init__(app, "View Current Employees")
+        self.panel = TablePanel("View Current Employees")
+        self.active_only = QCheckBox("Active only")
+        self.active_only.setChecked(True)
+        self.active_only.stateChanged.connect(lambda _=None: self.refresh())
         refresh = button("Refresh", True)
         refresh.clicked.connect(self.refresh)
+        actions = QHBoxLayout()
+        actions.addWidget(self.active_only)
+        actions.addStretch(1)
+        actions.addWidget(refresh)
         layout = QVBoxLayout(self)
-        layout.addWidget(refresh, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(actions)
         layout.addWidget(self.panel)
 
     def refresh(self):
         try:
             with adhoc_connect() as conn:
-                rows = conn.cursor().execute(
-                    """
+                sql = """
                     SELECT OperatorID, FullName, Department, Shift, Role, IsActive, HireDate
                     FROM dbo.Operators
-                    ORDER BY FullName
-                    """
-                ).fetchall()
+                """
+                if self.active_only.isChecked():
+                    sql += " WHERE ISNULL(IsActive, 1) = 1"
+                sql += " ORDER BY FullName"
+                rows = conn.cursor().execute(sql).fetchall()
             self.panel.set_rows(["Operator ID", "Full Name", "Department", "Shift", "Role", "IsActive", "HireDate"], rows)
         except Exception as exc:
-            QMessageBox.critical(self, APP_TITLE, f"Could not load headcount.\n\n{exc}")
+            QMessageBox.critical(self, APP_TITLE, f"Could not load employees.\n\n{exc}")
 
 
 class EmployeePage(Page):
@@ -838,10 +997,7 @@ class EmployeePage(Page):
         self.department = QLineEdit()
         self.shift = QLineEdit()
         self.role = QLineEdit()
-        self.hire_date = QDateEdit()
-        self.hire_date.setCalendarPopup(True)
-        self.hire_date.setDisplayFormat("yyyy-MM-dd")
-        self.hire_date.setDate(QDate.currentDate())
+        self.hire_date = configure_date_edit(QDateEdit())
         self.active = QCheckBox("Is Active")
         self.active.setChecked(True)
 
@@ -1002,6 +1158,8 @@ class JoblogTracker(QMainWindow):
     def __init__(self):
         super().__init__()
         self.operator = None
+        self.joblog_pull_lock = threading.Lock()
+        self.joblog_pull_running = False
         self.setWindowTitle(APP_TITLE)
         self.resize(1280, 820)
 
@@ -1045,7 +1203,7 @@ class JoblogTracker(QMainWindow):
             "Assign Job to Line": AssignLinePage(self),
             "View Assigned Production Lines": AssignedLinesPage(self),
             "Update Job Location": UpdateLocationPage(self),
-            "View Current Headcount": HeadcountPage(self),
+            "View Current Employees": HeadcountPage(self),
             "Add/Update Employee": EmployeePage(self),
             "Job Tracking": JobTrackingPage(self),
         }
@@ -1096,7 +1254,7 @@ class JoblogTracker(QMainWindow):
             "Update Job Location",
         ]
         if role in ROLE_FULL_MENU:
-            return base + ["View Current Headcount", "Add/Update Employee"]
+            return base + ["View Current Employees", "Add/Update Employee"]
         if role in ROLE_JOBLOG_MENU:
             return base
         return ["Job Tracking"]
@@ -1115,6 +1273,23 @@ class JoblogTracker(QMainWindow):
         if not last_pull or last_pull <= datetime.now() - timedelta(hours=1):
             self.pull_joblog(force=True)
 
+    def start_background_joblog_pull(self):
+        with self.joblog_pull_lock:
+            if self.joblog_pull_running:
+                return
+            self.joblog_pull_running = True
+
+        def worker():
+            try:
+                self.pull_joblog_if_due()
+            except Exception:
+                pass
+            finally:
+                with self.joblog_pull_lock:
+                    self.joblog_pull_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def pull_joblog(self, force=False):
         pulled_at = datetime.now()
         source_rows = self.load_joblog_creation_rows()
@@ -1126,9 +1301,14 @@ class JoblogTracker(QMainWindow):
                 if description_is_excluded(work_desc):
                     continue
                 job_number = as_int_or_none(value(row, "JobNumber"))
+                pallet_number = value(row, "PalletNumber")
                 customer = value(row, "Customer") or ""
+                customer = CUSTOMER_MAP.get(customer, customer)
                 if job_number is None or not customer:
                     continue
+                ship_by = value(row, "ShipBy")
+                if str(pallet_number or "").strip().lower() == "stock":
+                    ship_by = None
                 desc = build_desc(work_desc, customer)
                 me, sr, ps = pull_sp_app_flags(value(row, "SP_APP"))
                 cur.execute(
@@ -1147,12 +1327,12 @@ class JoblogTracker(QMainWindow):
                         (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     job_number,
-                    value(row, "PalletNumber"),
+                    pallet_number,
                     customer,
                     value(row, "Diameter"),
                     value(row, "Thickness"),
                     as_int_or_none(value(row, "Length")),
-                    value(row, "ShipBy"),
+                    ship_by,
                     value(row, "SP_APP"),
                     desc,
                     me,
@@ -1163,12 +1343,12 @@ class JoblogTracker(QMainWindow):
                     value(row, "Date_Completed"),
                     value(row, "RUSH"),
                     job_number,
-                    value(row, "PalletNumber"),
+                    pallet_number,
                     customer,
                     value(row, "Diameter"),
                     value(row, "Thickness"),
                     as_int_or_none(value(row, "Length")),
-                    value(row, "ShipBy"),
+                    ship_by,
                     value(row, "SP_APP"),
                     desc,
                     me,
