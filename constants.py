@@ -21,6 +21,7 @@ ROLE_FULL_MENU = [
     "Admin Assistant",
     "Data Engineer",
     "Human Resources Generalist",
+    "Production Supervisor",
     "Plant Manager",
     "Plant Production Manager",
 ]
@@ -42,7 +43,6 @@ ROLE_JOBLOG_MENU = [
     "Production Control Lead",
     "Production Foreman",
     "Production Scheduler MFG",
-    "Production Supervisor",
     "Quality Control Engineer",
     "Scheduling Coordinator",
     "Senior Quality Manager",

@@ -25,7 +25,7 @@ class JobTrackingPage(QWidget):
 
         # Define the complete list of manufacturing lines
         self.ALL_LINES = [
-            "Slitter 1", "Slitter 2", "Slitter 3", "4", "5",
+            "Slitter 1", "Slitter 2", "Slitter 3", "1", "2", "3", "4", "5",
             "6", "7", "9", "10", "11", "12", "13", "14", "15", "17", "Special Apps"
         ]
 

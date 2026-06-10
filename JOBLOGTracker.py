@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt
 
 from joblog_sync import run_automated_joblog_sync
 from styles import STYLE
+from constants import ROLE_FULL_MENU, ROLE_JOBLOG_MENU
 from pages.login_page import LoginPage
 from pages.menu_page import MenuPage
 from pages.joblog_page import JoblogPage
@@ -18,6 +19,7 @@ from pages.employee_page import EmployeePage
 from pages.job_tracking_page import JobTrackingPage
 from pages.headcount_page import HeadcountPage
 from pages.assigned_line_page import AssignedLinePage
+from pages.job_progress_page import JobProgressPage
 
 
 class JoblogTracker(QMainWindow):
@@ -83,30 +85,46 @@ class JoblogTracker(QMainWindow):
         self.setCentralWidget(self.login)
 
     def show_role_home(self):
-        from constants import ROLE_FULL_MENU
-    
-        # Fires off background sync pipeline thread cleanly from your imported module
+        from constants import ROLE_FULL_MENU, ROLE_JOBLOG_MENU
+
         run_automated_joblog_sync()
-    
-        if self.operator and getattr(self.operator, "Role", "") in ROLE_FULL_MENU:
+
+        role = getattr(self.operator, "Role", "")
+
+        if role in ROLE_FULL_MENU or role in ROLE_JOBLOG_MENU:
             self.menu = MenuPage(self)
             self.setCentralWidget(self.menu)
         else:
             self.navigate("Job Tracking")
 
     def available_pages(self):
-        from constants import ROLE_FULL_MENU
-        if self.operator and getattr(self.operator, "Role", "") in ROLE_FULL_MENU:
+        from constants import ROLE_FULL_MENU, ROLE_JOBLOG_MENU
+
+        role = getattr(self.operator, "Role", "")
+
+        if role in ROLE_FULL_MENU:
             return [
-                "View Current Headcount",
-                "Add/Update Employee",
-                "View Joblog",
-                "Assign Job to Line",
-                "View/Update Assigned Production Lines",
-                "Update Job Location"
-            ]
+            "Job Progress",
+            "View Current Headcount",
+            "Add/Update Employee",
+            "Assign Job to Line",
+            "View/Update Assigned Production Lines",
+            "Update Job Location",
+            "View Joblog"
+        ]
+
+        elif role in ROLE_JOBLOG_MENU:
+            return [
+            "Assign Job to Line",
+            "View/Update Assigned Production Lines",
+            "Update Job Location",
+            "View Joblog"
+        ]
+
         else:
-            return ["View Current Headcount", "Job Tracking"]
+            return [
+            "Job Tracking"
+        ]
 
     def navigate(self, name):
         if name in ("Home", "Menu"):
@@ -127,6 +145,8 @@ class JoblogTracker(QMainWindow):
             self.setCentralWidget(HeadcountPage(self))
         elif name == "View/Update Assigned Production Lines":
             self.setCentralWidget(AssignedLinePage(self))
+        elif name == "Job Progress":
+            self.setCentralWidget(JobProgressPage(self))
 
 
 def main():

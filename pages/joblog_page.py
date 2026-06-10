@@ -1,3 +1,5 @@
+# joblog_page.py
+
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -37,6 +39,7 @@ def _apply_calendar_style(date_edit: QDateEdit):
     if cal:
         cal.setStyleSheet(CALENDAR_STYLE)
 
+
 class JoblogPage(QWidget):
     def __init__(self, app):
         super().__init__()
@@ -44,34 +47,56 @@ class JoblogPage(QWidget):
         self.setObjectName("root")
 
         self.panel = TablePanel("View Open Production Joblog")
-        if hasattr(self.panel, "table"):
-            self.panel.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        elif hasattr(self.panel, "table_view"):
-            self.panel.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.panel.search_input.textChanged.connect(self.filter_table)
+
+        # BUG FIX 1: TablePanel only exposes table_view, never table.
+        # Use table_view directly instead of probing both attributes.
+        self.panel.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
         # --- SORTING INITIALIZATION ---
-        # 6 is ShipBy in the column_map below
-        self.sort_col_idx = 6 
-        self.sort_desc = False 
+        # Column 6 = ShipBy per column_map below
+        self.sort_col_idx = 6
+        self.sort_desc = False
 
+        # Display column index → SQL column name
         self.column_map = {
-            0: "PalletNumber", 1: "JobNumber", 2: "Customer", 3: "Diameter",
-            4: "Thickness", 5: "Length", 6: "ShipBy", 7: "SP_APP",
-            8: "[DESC]", 9: "RUSH", 10: "PullBelt"
+            0: "PalletNumber", 1: "JobNumber",  2: "Customer",  3: "Diameter",
+            4: "Thickness",    5: "Length",      6: "ShipBy",    7: "SP_APP",
+            8: "[DESC]",       9: "RUSH",       10: "PullBelt", 11: "Revision"
         }
 
+        # Columns that are compared against JOBLOG_History for change highlighting.
+        # Keys are display column indices; values match the history query field order:
+        #   row[0]=JobNumber, row[1]=PalletNumber, row[2]=Customer, row[3]=Diameter,
+        #   row[4]=Thickness, row[5]=ShipBy  (history snapshot)
+        #   row[6]=cur_Pallet, row[7]=cur_Customer, row[8]=cur_Diameter,
+        #   row[9]=cur_Thickness, row[10]=cur_ShipBy  (current live values)
+        # BUG FIX 3: display_col values corrected to match column_map above.
         self.tracked_columns = {
             0: "PalletNumber",
             2: "Customer",
             3: "Diameter",
             4: "Thickness",
-            6: "ShipBy"
+            6: "ShipBy",
         }
 
         # --- UI Elements ---
         self.use_date_filter = QCheckBox("Filter by Date")
         self.use_date_filter.setCursor(Qt.CursorShape.PointingHandCursor)
         self.use_date_filter.setStyleSheet("font-weight: bold; color: #555555;")
+        self.use_date_filter.toggled.connect(self.refresh)
+
+        self.show_batesville_stock = QCheckBox("Show Batesville Stock")
+        self.show_batesville_stock.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_batesville_stock.setChecked(False)
+        self.show_batesville_stock.setStyleSheet("font-weight: bold; color: #555555;")
+        self.show_batesville_stock.toggled.connect(self.refresh)
+
+        self.show_revisions = QCheckBox("Show Revisions")
+        self.show_revisions.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_revisions.setChecked(False)
+        self.show_revisions.setStyleSheet("font-weight: bold; color: #555555;")
+        self.show_revisions.toggled.connect(self.refresh)
 
         self.start_date = QDateEdit(QDate.currentDate().addDays(-30))
         self.start_date.setCalendarPopup(True)
@@ -105,7 +130,9 @@ class JoblogPage(QWidget):
         top_bar = QHBoxLayout()
         session_frame = QFrame()
         session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("QFrame#session_banner { background-color: #E8650A; border-radius: 8px; }")
+        session_frame.setStyleSheet(
+            "QFrame#session_banner { background-color: #E8650A; border-radius: 8px; }"
+        )
         session_layout = QHBoxLayout(session_frame)
         name_str = self.app.operator.FullName if self.app.operator else "Unknown"
         session_layout.addWidget(QLabel(f"Logged in as: {name_str}"))
@@ -130,28 +157,59 @@ class JoblogPage(QWidget):
         filter_layout.addWidget(self.start_date)
         filter_layout.addWidget(QLabel("End:"))
         filter_layout.addWidget(self.end_date)
+        filter_layout.addSpacing(10)
+        filter_layout.addWidget(self.show_batesville_stock)
+        filter_layout.addWidget(self.show_revisions)
         filter_layout.addStretch()
         filter_layout.addWidget(refresh_btn)
         filter_layout.addWidget(force_sync_btn)
         master_layout.addWidget(filter_card)
 
         master_layout.addWidget(self.panel, stretch=1)
-        
+
         # Initialize sorting hook and load data
         self._ensure_sorting_hook()
         self.refresh()
 
+    # --------------------------------------------------------------------------
+
+    def filter_table(self, text):
+        proxy = getattr(self.panel, "filter_proxy", None)
+        if proxy:
+            proxy.set_search_text(text)
+
+    # --------------------------------------------------------------------------
+
     def _load_changed_cells(self):
+        """
+        Returns {job_number (int): set_of_display_col_indices_that_changed}.
+
+        History query column layout (0-based):
+            0  JobNumber
+            1  h.PalletNumber   (snapshot)
+            2  h.Customer       (snapshot)
+            3  h.Diameter       (snapshot)
+            4  h.Thickness      (snapshot)
+            5  h.ShipBy         (snapshot)
+            6  j.PalletNumber   (current)
+            7  j.Customer       (current)
+            8  j.Diameter       (current)
+            9  j.Thickness      (current)
+            10 j.ShipBy         (current)
+
+        col_pairs: (history_snapshot_idx, current_live_idx, display_col_in_grid)
+        BUG FIX 3: display_col values aligned with self.column_map.
+        """
         changed = {}
         try:
             with adhoc_connect() as conn:
                 cursor = conn.cursor()
                 rows = cursor.execute("""
-                    SELECT h.JobNumber, h.PalletNumber, h.Customer, h.Diameter,
-                           h.Thickness, h.ShipBy,
+                    SELECT h.JobNumber,
+                           h.PalletNumber, h.Customer, h.Diameter, h.Thickness, h.ShipBy,
                            j.PalletNumber AS cur_Pallet, j.Customer AS cur_Customer,
-                           j.Diameter AS cur_Diameter, j.Thickness AS cur_Thickness,
-                           j.ShipBy AS cur_ShipBy
+                           j.Diameter     AS cur_Diameter, j.Thickness AS cur_Thickness,
+                           j.ShipBy       AS cur_ShipBy
                     FROM (
                         SELECT *, ROW_NUMBER() OVER (
                             PARTITION BY JobNumber ORDER BY ChangeDate DESC
@@ -163,7 +221,16 @@ class JoblogPage(QWidget):
                     WHERE h.rn = 1
                 """).fetchall()
 
-            col_pairs = [(1, 6, 0), (2, 7, 2), (3, 8, 3), (4, 9, 4), (5, 10, 6)]
+            # (history_idx, current_idx, display_col)
+            # display_col matches column_map: PalletNumber=0, Customer=2,
+            # Diameter=3, Thickness=4, ShipBy=6
+            col_pairs = [
+                (1, 6,  0),   # PalletNumber
+                (2, 7,  2),   # Customer
+                (3, 8,  3),   # Diameter
+                (4, 9,  4),   # Thickness
+                (5, 10, 6),   # ShipBy
+            ]
 
             for row in rows:
                 job_num = row[0]
@@ -175,51 +242,83 @@ class JoblogPage(QWidget):
                         flagged_cols.add(display_col)
                 if flagged_cols:
                     changed[job_num] = flagged_cols
+
         except Exception as exc:
             print(f"[CHANGE HIGHLIGHT] Failed to load history diff: {exc}")
+
         return changed
 
+    # --------------------------------------------------------------------------
+
     def apply_row_colors(self, changed_cells: dict):
-        view = getattr(self.panel, "table", None) or getattr(self.panel, "table_view", None)
-        if not view: return
+        # BUG FIX 1: use table_view directly — TablePanel has no `.table` attribute.
+        view = self.panel.table_view
         model = view.model()
         source_model = model.sourceModel() if hasattr(model, "sourceModel") else model
-        RED, BLUE, ORANGE = QColor("#FF4C4C"), QColor("#D1EAFF"), QColor("#FFE5CC")
+
+        RED    = QColor("#FF4C4C")
+        BLUE   = QColor("#D1EAFF")
+        ORANGE = QColor("#FFE5CC")
+
         for row in range(source_model.rowCount()):
             dia_item = source_model.item(row, 3)
             row_color = None
             if dia_item:
                 val = dia_item.text().lower()
-                if "trans" in val: row_color = BLUE
-                elif "taper" in val: row_color = ORANGE
+                if "trans" in val:
+                    row_color = BLUE
+                elif "taper" in val:
+                    row_color = ORANGE
+
             if row_color:
                 for col in range(source_model.columnCount()):
                     cell = source_model.item(row, col)
-                    if cell: cell.setBackground(QBrush(row_color))
+                    if cell:
+                        cell.setBackground(QBrush(row_color))
+
             job_item = source_model.item(row, 1)
-            if not job_item: continue
+            if not job_item:
+                continue
             try:
                 job_num = int(job_item.text())
                 if job_num in changed_cells:
                     for col_idx in changed_cells[job_num]:
                         cell = source_model.item(row, col_idx)
-                        if cell: cell.setBackground(QBrush(RED))
-            except ValueError: continue
+                        if cell:
+                            cell.setBackground(QBrush(RED))
+            except ValueError:
+                continue
+
+    # --------------------------------------------------------------------------
 
     def refresh(self):
         try:
             sql = """
                 SELECT PalletNumber, JobNumber, Customer, Diameter, Thickness,
-                       Length, ShipBy, SP_APP, [DESC], RUSH, PullBelt
-                FROM dbo.vw_JOBLOG_Open WHERE 1 = 1
+                       Length, ShipBy, SP_APP, [DESC], RUSH, PullBelt, Revision
+                FROM dbo.vw_JOBLOG_Open
+                WHERE 1 = 1
             """
             params = []
+
             if self.use_date_filter.isChecked():
                 sql += " AND ShipBy BETWEEN ? AND ?"
                 params.extend([
                     self.start_date.date().toString("yyyy-MM-dd"),
-                    self.end_date.date().toString("yyyy-MM-dd")
+                    self.end_date.date().toString("yyyy-MM-dd"),
                 ])
+
+            if self.show_batesville_stock.isChecked():
+                sql += " AND (ShipBy IS NULL OR LTRIM(RTRIM(ShipBy)) = '')"
+            else:
+                sql += " AND (ShipBy IS NOT NULL AND LTRIM(RTRIM(ShipBy)) != '')"
+
+            if self.show_revisions.isChecked():
+                sql += """ AND PalletNumber IN (
+                    SELECT PalletNumber
+                    FROM dbo.vw_JOBLOG_Open
+                    WHERE Revision = 'NEW'
+                )"""
 
             col_name  = self.column_map.get(self.sort_col_idx, "PalletNumber")
             direction = "DESC" if self.sort_desc else "ASC"
@@ -228,19 +327,29 @@ class JoblogPage(QWidget):
             if col_name == "PalletNumber":
                 sql += f" ORDER BY LTRIM(RTRIM(PalletNumber)) {direction}, JobNumber ASC"
             else:
-                sql += f" ORDER BY MIN({safe_col}) OVER(PARTITION BY LTRIM(RTRIM(PalletNumber))) {direction}, LTRIM(RTRIM(PalletNumber)) ASC, JobNumber ASC"
+                sql += (
+                    f" ORDER BY MIN({safe_col}) OVER"
+                    f"(PARTITION BY LTRIM(RTRIM(PalletNumber))) {direction},"
+                    f" LTRIM(RTRIM(PalletNumber)) ASC, JobNumber ASC"
+                )
 
             with adhoc_connect() as conn:
-                rows = conn.cursor().execute(sql, *params).fetchall()
+                # BUG FIX 4: pass params as a list, not unpacked with *.
+                # pyodbc expects execute(sql, [p1, p2]) not execute(sql, p1, p2).
+                rows = conn.cursor().execute(sql, params).fetchall()
 
             formatted_rows = [
-                [r[0], r[1], r[2], r[3], r[4], r[5],
-                 app_date_text(r[6]), r[7], r[8], r[9], r[10]]
+                [
+                    r[0], r[1], r[2], r[3], r[4], r[5],
+                    app_date_text(r[6]), r[7], r[8], r[9], r[10], r[11],
+                ]
                 for r in rows
             ]
 
-            headers = ["Pallet #", "Job #", "Customer", "Diameter", "Thickness",
-                       "Length", "Ship By", "SP APP", "DESC", "Rush", "Pull Belt"]
+            headers = [
+                "Pallet #", "Job #", "Customer", "Diameter", "Thickness",
+                "Length", "Ship By", "SP APP", "DESC", "Rush", "Pull Belt", "Revision",
+            ]
             self.panel.set_rows(headers, formatted_rows)
 
             changed_cells = self._load_changed_cells()
@@ -249,21 +358,29 @@ class JoblogPage(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Error loading Joblog:\n{str(exc)}")
 
+    # --------------------------------------------------------------------------
+
     def sort_handler(self, logical_index):
         if logical_index not in self.column_map:
             return
-        self.sort_desc = not self.sort_desc if logical_index == self.sort_col_idx else False
+        self.sort_desc = (
+            not self.sort_desc if logical_index == self.sort_col_idx else False
+        )
         self.sort_col_idx = logical_index
         self.refresh()
 
     def _ensure_sorting_hook(self):
-        table_obj = getattr(self.panel, "table", None) or getattr(self.panel, "table_view", None)
-        if table_obj:
-            table_obj.setSortingEnabled(False)
-            header = table_obj.horizontalHeader()
-            try: header.sectionClicked.disconnect(self.sort_handler)
-            except: pass
-            header.sectionClicked.connect(self.sort_handler)
+        # BUG FIX 1: table_view only — no need to probe for .table.
+        table_obj = self.panel.table_view
+        table_obj.setSortingEnabled(False)
+        header = table_obj.horizontalHeader()
+        try:
+            header.sectionClicked.disconnect(self.sort_handler)
+        except Exception:
+            pass
+        header.sectionClicked.connect(self.sort_handler)
+
+    # --------------------------------------------------------------------------
 
     def force_sync(self):
         try:

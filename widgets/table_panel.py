@@ -1,10 +1,11 @@
 # widgets/table_panel.py
 
 import csv
+import re
+
 from PyQt6.QtWidgets import QStyledItemDelegate
 from PyQt6.QtGui import QColor, QBrush
-from PyQt6.QtCore import Qt
-from PyQt6.QtCore import QSortFilterProxyModel, Qt
+from PyQt6.QtCore import Qt, QSortFilterProxyModel
 from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QWidget,
@@ -16,127 +17,185 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QHeaderView,
     QPushButton,
-    QLabel
+    QLabel,
 )
 from config import APP_TITLE
 
-class ContainsFilterProxy(QSortFilterProxyModel):
+
+class AdvancedFilterProxy(QSortFilterProxyModel):
     def __init__(self):
         super().__init__()
         self.search_text = ""
 
     def set_search_text(self, text):
-        self.search_text = (text or "").lower()
+        self.search_text = (text or "").strip().lower()
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row, source_parent):
-        if not self.search_text:
+        text = self.search_text
+        if not text:
             return True
+
         model = self.sourceModel()
+
+        # ------------------------------------------------------------------
+        # KEY MAP  (column indices → friendly filter keys)
+        # ------------------------------------------------------------------
+        key_map = {
+            "pallet":    0, "p":       0,
+            "job":       1, "j":       1,
+            "customer":  2, "c":       2,
+            "diameter":  3, "d":       3,
+            "thickness": 4, "t":       4,
+            "length":    5, "l":       5,
+            "sp_app":    7,
+            "desc":      8,
+            "shipby":    6,
+        }
+
+        # ------------------------------------------------------------------
+        # Structured key=value pairs, e.g. "d=8 t=16.5"
+        # ------------------------------------------------------------------
+        pattern = r"(\b[a-zA-Z_ ]+)\s*=\s*([^=]+?)(?=\s+\b[a-zA-Z_ ]+\s*=|$)"
+        pairs = re.findall(pattern, text)
+        conditions = []
+        for k, v in pairs:
+            k = " ".join(k.split())
+            v = v.strip()
+            if k in key_map:
+                conditions.append((key_map[k], v))
+
+        if conditions:
+            for col, val in conditions:
+                idx = model.index(source_row, col, source_parent)
+                cell = str(model.data(idx) or "").lower()
+                if val not in cell:
+                    return False
+            return True
+
+        # ------------------------------------------------------------------
+        # Fallback: global substring search across all columns
+        # ------------------------------------------------------------------
         for col in range(model.columnCount()):
-            index = model.index(source_row, col, source_parent)
-            if self.search_text in str(model.data(index) or "").lower():
+            idx = model.index(source_row, col, source_parent)
+            if text in str(model.data(idx) or "").lower():
                 return True
+
         return False
+
+
 class RowColorDelegate(QStyledItemDelegate):
+    """
+    Paints transition rows blue and taper rows orange by scanning all rows
+    that share the same PalletNumber (column 0) and checking Diameter (col 3).
+    Change-highlight red is applied directly to the source model items by
+    JoblogPage.apply_row_colors(), so this delegate only handles group colors.
+    """
+
     def paint(self, painter, option, index):
         proxy_model = index.model()
-        
-        # 1. Get the PalletNumber for the current row (Column 0)
-        pallet_idx = proxy_model.index(index.row(), 0)
+
+        # Current row's PalletNumber
+        pallet_idx   = proxy_model.index(index.row(), 0)
         current_pallet = str(proxy_model.data(pallet_idx) or "").strip()
-        
-        # 2. Scan the whole model for this PalletNumber
+
         has_trans = False
         has_taper = False
-        
+
         for r in range(proxy_model.rowCount()):
-            # Check PalletNumber column (0)
             p_idx = proxy_model.index(r, 0)
             if str(proxy_model.data(p_idx) or "").strip() == current_pallet:
-                # Check Diameter column (3)
                 diam_idx = proxy_model.index(r, 3)
                 diam_val = str(proxy_model.data(diam_idx) or "").lower()
-                
-                if "trans" in diam_val: has_trans = True
-                if "taper" in diam_val: has_taper = True
+                if "trans" in diam_val:
+                    has_trans = True
+                if "taper" in diam_val:
+                    has_taper = True
 
-        # 3. Apply color based on group findings
         color = None
         if has_trans:
             color = QColor("#D1EAFF")
         elif has_taper:
             color = QColor("#FFE5CC")
-            
+
         if color:
             painter.save()
             painter.fillRect(option.rect, color)
             painter.restore()
-            
+
         super().paint(painter, option, index)
+
 
 class TablePanel(QWidget):
     def __init__(self, title, parent=None):
         super().__init__(parent)
-        self.title = title
+        self.title   = title
+        self.headers = []
 
-        # --- Inline Search Input ---
+        # ------------------------------------------------------------------
+        # Models — must be created BEFORE any reference to self.proxy_model.
+        # BUG FIX 1 (original): self.filter_proxy = self.proxy_model was
+        # written before self.proxy_model was assigned, causing AttributeError
+        # on every construction.  Models are now built first, then the search
+        # input is wired up below.
+        # ------------------------------------------------------------------
+        self.source_model = QStandardItemModel()
+        self.proxy_model  = AdvancedFilterProxy()
+        self.proxy_model.setSourceModel(self.source_model)
+
+        # Public alias used by consumers (e.g. joblog_page.filter_table)
+        self.filter_proxy = self.proxy_model
+
+        # ------------------------------------------------------------------
+        # Search input
+        # ------------------------------------------------------------------
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 Search and filter rows...")
         self.search_input.setMinimumHeight(38)
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self.filter_text)
 
-        # --- Data Export Action ---
+        # ------------------------------------------------------------------
+        # Export button
+        # ------------------------------------------------------------------
         export_btn = QPushButton("Export CSV")
         export_btn.setObjectName("secondary_button")
         export_btn.setMinimumHeight(38)
         export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         export_btn.clicked.connect(self.export_data)
 
-        # --- Grid Presentation Views ---
+        # ------------------------------------------------------------------
+        # Table view
+        # ------------------------------------------------------------------
         self.table_view = QTableView()
-        
-        # 1. Use the delegate for custom colors
         self.table_view.setItemDelegate(RowColorDelegate())
-        
-        # 2. IMPORTANT: Keep this FALSE so the stylesheet/view 
-        # doesn't paint over your delegate's work.
-        self.table_view.setAlternatingRowColors(False) 
-        
-        # 3. Transparent background allows the delegate to control the full row
+        self.table_view.setAlternatingRowColors(False)
         self.table_view.setStyleSheet("QTableView { background-color: transparent; }")
-        
         self.table_view.setSortingEnabled(True)
-
-
-        self.source_model = QStandardItemModel()
-        self.proxy_model = ContainsFilterProxy()
-        self.proxy_model.setSourceModel(self.source_model)
         self.table_view.setModel(self.proxy_model)
 
-        # --- Component Layout Construction ---
+        # ------------------------------------------------------------------
+        # Layout
+        # ------------------------------------------------------------------
         actions_header = QHBoxLayout()
         actions_header.setContentsMargins(0, 0, 0, 0)
         actions_header.setSpacing(15)
 
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #333333;")
-        
+
         actions_header.addWidget(title_lbl)
         actions_header.addStretch(1)
         actions_header.addWidget(self.search_input, stretch=2)
         actions_header.addWidget(export_btn)
 
         layout = QVBoxLayout(self)
-        # 0 margins prevent compounding outer padding boundaries when embedded inside main page layouts
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        
         layout.addLayout(actions_header)
         layout.addWidget(self.table_view)
 
-        self.headers = []
+    # --------------------------------------------------------------------------
 
     def filter_text(self, text):
         self.proxy_model.set_search_text(text)
@@ -145,18 +204,20 @@ class TablePanel(QWidget):
         self.headers = headers
         self.source_model.clear()
         self.source_model.setHorizontalHeaderLabels(headers)
-
         for row in rows:
-            items = []
-            for item in row:
-                # Standardize empty/null fields to non-breaking structural spacing tokens
-                items.append(QStandardItem(" " if item is None else str(item)))
+            items = [
+                QStandardItem(" " if item is None else str(item))
+                for item in row
+            ]
             self.source_model.appendRow(items)
-            
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table_view.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
 
     def export_data(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export Data Registry", "", "CSV Files (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Data Registry", "", "CSV Files (*.csv)"
+        )
         if not path:
             return
         try:
@@ -169,6 +230,10 @@ class TablePanel(QWidget):
                         idx = self.proxy_model.index(r, c)
                         row_data.append(self.proxy_model.data(idx) or "")
                     writer.writerow(row_data)
-            QMessageBox.information(self, APP_TITLE, "Data matrix registry exported successfully.")
+            QMessageBox.information(
+                self, APP_TITLE, "Data matrix registry exported successfully."
+            )
         except Exception as e:
-            QMessageBox.critical(self, APP_TITLE, f"Export routine failure:\n{str(e)}")
+            QMessageBox.critical(
+                self, APP_TITLE, f"Export routine failure:\n{str(e)}"
+            )

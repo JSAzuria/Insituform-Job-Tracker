@@ -53,14 +53,22 @@ def value(row, name, default=None):
 
 
 def pull_sp_app_flags(sp_app):
-  """Parses a special application token string and extracts specific flag criteria matches."""
-  text = (sp_app or "").upper()
+    """Parses SP_APP and extracts ME, SR, and PS/FPS count."""
 
-  return (
-    1 if "ME" in text else None,
-    1 if "SR" in text else None,
-    1 if "PS" in text or "FPS" in text else None,
-  )
+    text = (sp_app or "").upper()
+
+    me_flag = 1 if "ME" in text else None
+    sr_flag = 1 if "SR" in text else None
+
+    ps_value = None
+
+    # look for FPS(n) or PS(n)
+    match = re.search(r'(FPS|PS)\((\d+)\)', text)
+
+    if match:
+        ps_value = int(match.group(2))
+
+    return me_flag, sr_flag, ps_value
 
 
 def excel_col_name(index):

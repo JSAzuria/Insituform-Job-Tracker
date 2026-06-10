@@ -43,15 +43,16 @@ WHEN MATCHED AND target.Date_Completed IS NULL THEN
         OrderDate    = source.OrderDate,
         RUSH         = source.RUSH,
         PullBelt     = source.PullBelt,
+        Revision     = source.Revision,
         LastPull     = GETDATE()
 
 WHEN NOT MATCHED BY TARGET THEN
     INSERT (JobNumber, PalletNumber, Customer, Diameter, Thickness, Length,
-            ShipBy, SP_APP, [DESC], ME, SR, PS, OrderDate, RUSH, PullBelt, LastPull)
+            ShipBy, SP_APP, [DESC], ME, SR, PS, OrderDate, RUSH, PullBelt, Revision, LastPull)
     VALUES (source.JobNumber, source.PalletNumber, source.Customer, source.Diameter,
             source.Thickness, source.Length, source.ShipBy, source.SP_APP, source.[DESC],
             source.ME, source.SR, source.PS, source.OrderDate, source.RUSH,
-            source.PullBelt, GETDATE());
+            source.PullBelt, source.Revision, GETDATE());
 """
 
 
@@ -107,7 +108,7 @@ def run_automated_joblog_sync(force=False):
                     edw_cursor.execute(f"""
                         SELECT JobNumber, PalletNumber, Customer, Diameter, Thickness, Length,
                                ShipBy, SP_APP, OrderDate, RUSH, WorkOrder_Description, Description_2,
-                               PullBelt, [DESC]
+                               PullBelt, Revision, [DESC]
                         FROM {view_target}
                         WHERE JobNumber IS NOT NULL
                     """)
@@ -141,6 +142,8 @@ def run_automated_joblog_sync(force=False):
                     diameter      = value(record, "Diameter")
                     is_transition = "TRANSITION" in (diameter or "").upper()
 
+                    revision_val  = value(record, "Revision")
+
                     length_raw = value(record, "Length")
                     if not is_transition and (length_raw is None or (isinstance(length_raw, str) and not length_raw.strip())):
                         continue
@@ -155,18 +158,19 @@ def run_automated_joblog_sync(force=False):
                         job_num,
                         value(record, "PalletNumber") or "",
                         customer_mapped,
-                        diameter,                           # View handles TRANSITION/TAPER logic
+                        diameter,                            # View handles TRANSITION/TAPER logic
                         value(record, "Thickness"),
                         length_raw,
                         value(record, "ShipBy"),
                         sp_app,
-                        value(record, "DESC", None),        # View handles DESC build logic
+                        value(record, "DESC", None),         # View handles DESC build logic
                         me_flag,
                         sr_flag,
                         ps_flag,
                         value(record, "OrderDate"),
                         value(record, "RUSH"),
                         value(record, "PullBelt"),
+                        revision_val,
                     ))
 
                 if not staging_rows:
@@ -181,8 +185,8 @@ def run_automated_joblog_sync(force=False):
                 adhoc_cursor.executemany("""
                     INSERT INTO dbo.STAGING_JOBLOG (
                         JobNumber, PalletNumber, Customer, Diameter, Thickness, Length,
-                        ShipBy, SP_APP, [DESC], ME, SR, PS, OrderDate, RUSH, PullBelt
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ShipBy, SP_APP, [DESC], ME, SR, PS, OrderDate, RUSH, PullBelt, Revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, staging_rows)
 
                 print("[SYNC] Staging load complete. Executing server-side MERGE...")
