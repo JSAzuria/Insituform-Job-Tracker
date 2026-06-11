@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QDateEdit,
     QMessageBox,
-    QPushButton,
     QLabel,
     QAbstractItemView,
     QFrame,
@@ -19,6 +18,8 @@ from database import adhoc_connect
 from config import APP_TITLE
 from widgets.table_panel import TablePanel
 from helpers import app_date_text
+from constants import shipped_special_apps_filter
+from ui_components import add_header_row, add_session_row, action_button
 
 CALENDAR_STYLE = """
     QCalendarWidget { background-color: #FFFFFF; color: #222222; }
@@ -45,6 +46,9 @@ class JoblogPage(QWidget):
         super().__init__()
         self.app = app
         self.setObjectName("root")
+        self.expanded_revision_pallets = set()
+        self.current_formatted_rows = []
+        self.current_changed_cells = {}
 
         self.panel = TablePanel("View Open Production Joblog")
         self.panel.search_input.textChanged.connect(self.filter_table)
@@ -52,6 +56,7 @@ class JoblogPage(QWidget):
         # BUG FIX 1: TablePanel only exposes table_view, never table.
         # Use table_view directly instead of probing both attributes.
         self.panel.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.panel.table_view.clicked.connect(self.toggle_revision_group)
 
         # --- SORTING INITIALIZATION ---
         # Column 6 = ShipBy per column_map below
@@ -110,44 +115,17 @@ class JoblogPage(QWidget):
         self.end_date.setMinimumHeight(38)
         _apply_calendar_style(self.end_date)
 
-        refresh_btn = QPushButton("Refresh Log")
-        refresh_btn.setMinimumHeight(38)
-        refresh_btn.clicked.connect(self.refresh)
-
-        force_sync_btn = QPushButton("Force EDW Sync")
-        force_sync_btn.setMinimumHeight(38)
-        force_sync_btn.clicked.connect(self.force_sync)
-
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.clicked.connect(lambda: self.app.navigate("Home"))
+        refresh_btn = action_button("Refresh Log", self.refresh, height=38)
+        force_sync_btn = action_button("Force EDW Sync", self.force_sync, height=38)
+        home_btn = action_button("Home Menu", lambda: self.app.navigate("Home"))
 
         # --- Layouts ---
         master_layout = QVBoxLayout(self)
         master_layout.setContentsMargins(24, 24, 24, 24)
         master_layout.setSpacing(20)
 
-        top_bar = QHBoxLayout()
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet(
-            "QFrame#session_banner { background-color: #E8650A; border-radius: 8px; }"
-        )
-        session_layout = QHBoxLayout(session_frame)
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        session_layout.addWidget(QLabel(f"Logged in as: {name_str}"))
-        session_layout.addWidget(QPushButton("Logout", clicked=lambda: self.app.navigate("Logout")))
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        master_layout.addLayout(top_bar)
-
-        header_rack = QHBoxLayout()
-        page_title = QLabel("Master Production Joblog")
-        page_title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        header_rack.addWidget(page_title)
-        header_rack.addStretch()
-        header_rack.addWidget(home_btn)
-        master_layout.addLayout(header_rack)
+        add_session_row(master_layout, self.app)
+        add_header_row(master_layout, "Master Production Joblog", home_btn)
 
         filter_card = QFrame()
         filter_card.setObjectName("glass")
@@ -170,6 +148,100 @@ class JoblogPage(QWidget):
         # Initialize sorting hook and load data
         self._ensure_sorting_hook()
         self.refresh()
+
+    # --------------------------------------------------------------------------
+
+    @staticmethod
+    def _revision_text(row):
+        return str(row[11] or "").strip().upper()
+
+    @staticmethod
+    def _clean_pallet_text(text):
+        pallet = str(text or "").strip()
+        if pallet.startswith(("+", "-")):
+            return pallet[1:].strip()
+        return pallet
+
+    def _format_revision_pallet(self, pallet, expanded):
+        return f"- {pallet}" if expanded else f"+ {pallet}"
+
+    def _revision_display_rows(self, rows):
+        grouped_rows = []
+        pallet_groups = {}
+
+        for row in rows:
+            pallet = str(row[0] or "").strip()
+            if pallet not in pallet_groups:
+                pallet_groups[pallet] = []
+                grouped_rows.append((pallet, pallet_groups[pallet]))
+            pallet_groups[pallet].append(row)
+
+        display_rows = []
+        for pallet, group in grouped_rows:
+            revisions = {self._revision_text(row) for row in group}
+            has_revision_pair = "NEW" in revisions and "OLD" in revisions
+
+            if not has_revision_pair:
+                display_rows.extend(group)
+                continue
+
+            expanded = pallet in self.expanded_revision_pallets
+            old_rows = [row for row in group if self._revision_text(row) == "OLD"]
+            old_rows_inserted = False
+
+            for row in group:
+                revision = self._revision_text(row)
+                if revision == "OLD":
+                    continue
+
+                display_row = list(row)
+                if revision == "NEW":
+                    display_row[0] = self._format_revision_pallet(pallet, expanded)
+                display_rows.append(display_row)
+
+                if expanded and revision == "NEW" and not old_rows_inserted:
+                    for old_row in old_rows:
+                        old_display_row = list(old_row)
+                        old_display_row[0] = f"  {pallet}"
+                        display_rows.append(old_display_row)
+                    old_rows_inserted = True
+
+            if expanded and not old_rows_inserted:
+                display_rows.extend(old_rows)
+
+        return display_rows
+
+    def toggle_revision_group(self, index):
+        if index.column() != 0:
+            return
+
+        source_index = self.panel.proxy_model.mapToSource(index)
+        pallet_item = self.panel.source_model.item(source_index.row(), 0)
+        if not pallet_item:
+            return
+
+        pallet_text = pallet_item.text()
+        if not pallet_text.startswith(("+", "-")):
+            return
+
+        pallet = self._clean_pallet_text(pallet_text)
+        if pallet in self.expanded_revision_pallets:
+            self.expanded_revision_pallets.remove(pallet)
+        else:
+            self.expanded_revision_pallets.add(pallet)
+
+        self._render_cached_rows()
+
+    # --------------------------------------------------------------------------
+
+    def _render_cached_rows(self):
+        headers = [
+            "Pallet #", "Job #", "Customer", "Diameter", "Thickness",
+            "Length", "Ship By", "SP APP", "DESC", "Rush", "Pull Belt", "Revision",
+        ]
+        display_rows = self._revision_display_rows(self.current_formatted_rows)
+        self.panel.set_rows(headers, display_rows)
+        self.apply_row_colors(self.current_changed_cells)
 
     # --------------------------------------------------------------------------
 
@@ -293,11 +365,13 @@ class JoblogPage(QWidget):
 
     def refresh(self):
         try:
-            sql = """
-                SELECT PalletNumber, JobNumber, Customer, Diameter, Thickness,
-                       Length, ShipBy, SP_APP, [DESC], RUSH, PullBelt, Revision
-                FROM dbo.vw_JOBLOG_Open
+            changed_cells = self._load_changed_cells()
+            sql = f"""
+                SELECT j.PalletNumber, j.JobNumber, j.Customer, j.Diameter, j.Thickness,
+                       j.Length, j.ShipBy, j.SP_APP, j.[DESC], j.RUSH, j.PullBelt, j.Revision
+                FROM dbo.vw_JOBLOG_Open j
                 WHERE 1 = 1
+                  AND {shipped_special_apps_filter("j.JobNumber")}
             """
             params = []
 
@@ -314,11 +388,21 @@ class JoblogPage(QWidget):
                 sql += " AND (ShipBy IS NOT NULL AND LTRIM(RTRIM(ShipBy)) != '')"
 
             if self.show_revisions.isChecked():
-                sql += """ AND PalletNumber IN (
-                    SELECT PalletNumber
-                    FROM dbo.vw_JOBLOG_Open
-                    WHERE Revision = 'NEW'
-                )"""
+                changed_job_numbers = list(changed_cells.keys())
+                revision_filters = [
+                    """PalletNumber IN (
+                        SELECT PalletNumber
+                        FROM dbo.vw_JOBLOG_Open
+                        WHERE Revision = 'NEW'
+                    )"""
+                ]
+
+                if changed_job_numbers:
+                    placeholders = ", ".join("?" for _ in changed_job_numbers)
+                    revision_filters.append(f"j.JobNumber IN ({placeholders})")
+                    params.extend(changed_job_numbers)
+
+                sql += " AND (" + " OR ".join(revision_filters) + ")"
 
             col_name  = self.column_map.get(self.sort_col_idx, "PalletNumber")
             direction = "DESC" if self.sort_desc else "ASC"
@@ -338,22 +422,15 @@ class JoblogPage(QWidget):
                 # pyodbc expects execute(sql, [p1, p2]) not execute(sql, p1, p2).
                 rows = conn.cursor().execute(sql, params).fetchall()
 
-            formatted_rows = [
+            self.current_changed_cells = changed_cells
+            self.current_formatted_rows = [
                 [
                     r[0], r[1], r[2], r[3], r[4], r[5],
                     app_date_text(r[6]), r[7], r[8], r[9], r[10], r[11],
                 ]
                 for r in rows
             ]
-
-            headers = [
-                "Pallet #", "Job #", "Customer", "Diameter", "Thickness",
-                "Length", "Ship By", "SP APP", "DESC", "Rush", "Pull Belt", "Revision",
-            ]
-            self.panel.set_rows(headers, formatted_rows)
-
-            changed_cells = self._load_changed_cells()
-            self.apply_row_colors(changed_cells)
+            self._render_cached_rows()
 
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Error loading Joblog:\n{str(exc)}")
@@ -384,8 +461,7 @@ class JoblogPage(QWidget):
 
     def force_sync(self):
         try:
-            from joblog_sync import run_automated_joblog_sync
-            run_automated_joblog_sync(force=True)
+            self.app.start_joblog_sync(force=True)
             QMessageBox.information(self, APP_TITLE, "Sync initiated in background.")
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Failed to sync:\n{str(exc)}")

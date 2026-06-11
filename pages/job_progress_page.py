@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Optional, Any
 from PyQt6.QtWidgets import (
     QWidget,
@@ -9,7 +10,6 @@ from PyQt6.QtWidgets import (
     QTableView,
     QMessageBox,
     QHeaderView,
-    QPushButton,
     QLabel,
     QFrame,
     QLineEdit,
@@ -22,13 +22,15 @@ from PyQt6.QtCore import Qt, QTimer
 from database import adhoc_connect
 from config import APP_TITLE
 from helpers import app_date_text
+from constants import shipped_special_apps_filter
+from ui_components import add_header_row, add_session_row, action_button
 
 
 class LineDropdownDelegate(QStyledItemDelegate):
     """Custom delegate providing a standardized shop floor dropdown editor for allocation cells."""
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, options=None):
         super().__init__(parent)
-        self.options = [
+        self.options = options or [
             "", "1", "2", "3", "4", "5",
             "6", "7", "9", "10", "11", "12", "13", "14", "15",
             "17", "Special Apps", "NR"
@@ -52,10 +54,13 @@ class LineDropdownDelegate(QStyledItemDelegate):
 
 
 class JobProgressPage(QWidget):
+    NR_ALLOWED_COLUMNS = {8, 9, 12}
+
     def __init__(self, app):
         super().__init__()
         self.app = app
         self.setObjectName("root")
+        self._bulk_update_in_progress = False
 
         # --- Data Grid Setup ---
         self.table = QTableView()
@@ -69,9 +74,19 @@ class JobProgressPage(QWidget):
         self.table.horizontalHeader().setStyleSheet("font-weight: bold; color: #333333;")
 
         # Attach dropdown delegates to manufacturing allocations (columns 8 to 14)
-        self.dropdown_delegate = LineDropdownDelegate(self)
-        for col_idx in range(8, 15):
-            self.table.setItemDelegateForColumn(col_idx, self.dropdown_delegate)
+        self.base_line_options = [
+            "", "1", "2", "3", "4", "5",
+            "6", "7", "9", "10", "11", "12", "13", "14", "15", "17"
+        ]
+        self.nr_line_options = self.base_line_options + ["NR"]
+        self.special_apps_options = ["", "Special Apps"]
+        self.line_dropdown_delegate = LineDropdownDelegate(self, self.base_line_options)
+        self.nr_line_dropdown_delegate = LineDropdownDelegate(self, self.nr_line_options)
+        self.special_apps_delegate = LineDropdownDelegate(self, self.special_apps_options)
+        for col_idx in range(8, 14):
+            delegate = self.nr_line_dropdown_delegate if col_idx in self.NR_ALLOWED_COLUMNS else self.line_dropdown_delegate
+            self.table.setItemDelegateForColumn(col_idx, delegate)
+        self.table.setItemDelegateForColumn(14, self.special_apps_delegate)
 
         # Connect the inline edit persistence hook
         self.model.itemChanged.connect(self.handle_inline_edit)
@@ -104,15 +119,8 @@ class JobProgressPage(QWidget):
         }
 
         # --- Control Actions ---
-        refresh_btn = QPushButton("Refresh Status")
-        refresh_btn.setMinimumHeight(40)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh)
-
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(self.app.show_role_home)
+        refresh_btn = action_button("Refresh Status", self.refresh)
+        home_btn = action_button("Home Menu", self.app.show_role_home)
 
         # --- Tokenized Search Bar ---
         self.search_bar = QLineEdit()
@@ -133,7 +141,6 @@ class JobProgressPage(QWidget):
         
         self.mass_line_selector = QComboBox()
         self.mass_line_selector.setMinimumHeight(34)
-        self.mass_line_selector.addItems([opt for opt in self.dropdown_delegate.options if opt != ""])
         mass_panel.addWidget(self.mass_line_selector)
         
         self.mass_op_selector = QComboBox()
@@ -141,16 +148,11 @@ class JobProgressPage(QWidget):
         self.mass_op_selector.addItem("All Shop Columns", "all")
         for col_idx, name in self.operation_map.items():
             self.mass_op_selector.addItem(name, col_idx)
+        self.mass_op_selector.currentIndexChanged.connect(self._refresh_mass_line_options)
         mass_panel.addWidget(self.mass_op_selector)
         
-        mass_run_btn = QPushButton("Mark Target as Complete")
-        mass_run_btn.setMinimumHeight(34)
-        mass_run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        mass_run_btn.setStyleSheet("""
-            QPushButton { background-color: #0A5C2C; color: white; font-weight: bold; padding: 0 16px; border-radius: 4px; }
-            QPushButton:hover { background-color: #0D7337; }
-        """)
-        mass_run_btn.clicked.connect(self.handle_mass_complete)
+        mass_run_btn = action_button("Apply Bulk Update", self.handle_mass_complete, height=34)
+        mass_run_btn.setProperty("success", True)
         mass_panel.addWidget(mass_run_btn)
         mass_panel.addStretch()
 
@@ -159,42 +161,8 @@ class JobProgressPage(QWidget):
         master_layout.setContentsMargins(24, 24, 24, 24)
         master_layout.setSpacing(20)
 
-        # Session Frame
-        top_bar = QHBoxLayout()
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner { background-color: #E8650A; border-radius: 8px; }
-            QLabel { color: #000000; font-weight: 800; font-size: 13px; background: transparent; }
-            QPushButton {
-                background: rgba(255,255,255,0.22); color: white;
-                border: 1px solid rgba(255,255,255,0.4); border-radius: 6px;
-                padding: 6px 14px; font-weight: 700;
-            }
-            QPushButton:hover { background: rgba(255,255,255,0.35); }
-        """)
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        session_layout.addWidget(QLabel(f"Tracking Console | Active User: {name_str}"))
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-        session_layout.addWidget(logout_btn)
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        master_layout.addLayout(top_bar)
-
-        # Title Rack
-        header_rack = QHBoxLayout()
-        page_title = QLabel("Live Production Progress Log")
-        page_title.setObjectName("sectionTitle")
-        page_title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        header_rack.addWidget(page_title)
-        header_rack.addStretch()
-        header_rack.addWidget(refresh_btn)
-        header_rack.addWidget(home_btn)
-        master_layout.addLayout(header_rack)
+        add_session_row(master_layout, self.app, prefix="Tracking Console | Active User")
+        add_header_row(master_layout, "Live Production Progress Log", refresh_btn, home_btn)
 
         # KPI Dashboard Cards
         kpi_rack = QHBoxLayout()
@@ -208,7 +176,84 @@ class JobProgressPage(QWidget):
         master_layout.addLayout(mass_panel)  # Injected Bulk Control Panel
         master_layout.addWidget(self.table)
 
+        self._refresh_mass_line_options()
         self.refresh()
+
+    @staticmethod
+    def _line_key(value: Any) -> str:
+        """Normalize displayed allocation values for exact line matching."""
+        text = "" if value is None else str(value).strip()
+        upper = text.upper()
+        if not upper:
+            return ""
+        if upper in ("NR", "999"):
+            return "NR"
+        if "SPECIAL APPS" in upper:
+            return "SPECIAL APPS"
+        slitter_match = re.fullmatch(r"SLITTER\s+(\d+)", upper)
+        if slitter_match:
+            return slitter_match.group(1)
+        numeric_match = re.fullmatch(r"\d+(?:\.0+)?", upper)
+        if numeric_match:
+            return str(int(float(upper)))
+        return upper
+
+    @staticmethod
+    def _to_numeric_allocation(val_str: str) -> Optional[Any]:
+        text = "" if val_str is None else str(val_str).strip()
+        key = JobProgressPage._line_key(text)
+        if not key or key == "NONE":
+            return None
+        if key == "NR":
+            return 999
+        if key == "SPECIAL APPS":
+            return "Special Apps"
+        if key.isdigit():
+            return int(key)
+        return text
+
+    @staticmethod
+    def _remove_operation_complete(cur, job_number: int, operation: str):
+        cur.execute(
+            """
+            DELETE FROM dbo.JobTracking
+            WHERE JobNumber = ?
+              AND Operation = ?
+              AND EventType = 'Complete'
+            """,
+            job_number, operation
+        )
+
+    def _options_for_operation_column(self, col_idx: int) -> list[str]:
+        if col_idx == 14:
+            return self.special_apps_options
+        if col_idx in self.NR_ALLOWED_COLUMNS:
+            return self.nr_line_options
+        return self.base_line_options
+
+    def _refresh_mass_line_options(self):
+        current_value = self.mass_line_selector.currentData()
+        if current_value is None:
+            current_value = self.mass_line_selector.currentText()
+
+        operation_target = self.mass_op_selector.currentData()
+        self.mass_line_selector.blockSignals(True)
+        self.mass_line_selector.clear()
+
+        if operation_target == "all":
+            for opt in self.base_line_options:
+                if opt:
+                    self.mass_line_selector.addItem(opt, opt)
+            self.mass_line_selector.addItem("Special Apps", "Special Apps")
+        else:
+            for opt in self._options_for_operation_column(operation_target):
+                label = "(Blank / Clear)" if opt == "" else opt
+                self.mass_line_selector.addItem(label, opt)
+
+        match_idx = self.mass_line_selector.findData(current_value)
+        if match_idx >= 0:
+            self.mass_line_selector.setCurrentIndex(match_idx)
+        self.mass_line_selector.blockSignals(False)
 
     def _create_kpi_card(self, title: str, value: str, color: str) -> QFrame:
         card = QFrame()
@@ -300,13 +345,23 @@ class JobProgressPage(QWidget):
                         j.Length, j.SP_APP, j.[DESC], j.ShipBy, j.Date_Completed,
                         m.InnerJoinMFG, m.OuterJoinMFG, m.InnerSewMFG, m.OuterSewMFG, 
                         m.ExtrusionMFG, m.InspectionMFG,
+                        CASE WHEN sa.JobNumber IS NULL THEN '' ELSE 'Special Apps' END AS SpecialAppsStep,
                         ISNULL(th.Operation, '') AS Step,
                         ISNULL(th.EventType, '') AS EventType
                     FROM dbo.JOBLOG j
                     CROSS APPLY (SELECT LTRIM(RTRIM(j.PalletNumber)) AS CleanPallet) AppPallet
                     LEFT JOIN dbo.JobEntry_MFGLine m ON m.JobNumber = j.JobNumber
                     LEFT JOIN HighestTracking th ON th.JobNumber = j.JobNumber AND th.rn = 1
+                    OUTER APPLY (
+                        SELECT TOP 1 t.JobNumber
+                        FROM dbo.JobTracking t
+                        WHERE t.JobNumber = j.JobNumber
+                          AND LTRIM(RTRIM(t.Operation)) = 'Special Apps'
+                          AND t.EventType = 'Complete'
+                        ORDER BY t.EventTime DESC
+                    ) sa
                     WHERE j.ShipBy >= CONVERT(DATE, DATEADD(day, -7, GETDATE()))
+                      AND {shipped_special_apps_filter("j.JobNumber")}
                 )
                 SELECT * FROM ProgressLog {order_by_clause}
             """
@@ -355,7 +410,7 @@ class JobProgressPage(QWidget):
                     clean_alloc(row.OuterSewMFG),
                     clean_alloc(row.ExtrusionMFG),
                     clean_alloc(row.InspectionMFG),
-                    "",  # Placeholder slot for index 14 ("Special Apps")
+                    str(row.SpecialAppsStep or ""),
                     str(row.Step),
                     str(row.EventType)
                 ]
@@ -390,6 +445,9 @@ class JobProgressPage(QWidget):
     # -----------------------------------------------------------------------
     def handle_inline_edit(self, item: QStandardItem):
         """Processes live view edits, updating production tables with dynamic validation."""
+        if self._bulk_update_in_progress:
+            return
+
         col = item.column()
         if col not in self.operation_map:
             return
@@ -410,6 +468,14 @@ class JobProgressPage(QWidget):
 
         if current_line == "Special Apps":
             current_operation = "Special Apps"
+        elif self._line_key(current_line) == "NR" and col not in self.NR_ALLOWED_COLUMNS:
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "NR is only allowed for Inner Join, Outer Join, and Extrusion."
+            )
+            QTimer.singleShot(0, self.refresh)
+            return
 
         if current_line and current_line.upper() != "NR":
             msg_box = QMessageBox(self)
@@ -433,21 +499,10 @@ class JobProgressPage(QWidget):
                 
             current_event_type = "On Line" if msg_box.clickedButton() == on_line_btn else "Complete"
 
-        def to_numeric_allocation(val_str: str) -> Optional[Any]:
-            t = val_str.upper().strip()
-            if not t or t == "NONE": return None
-            if t == "NR" or "999" in t: return 999
-            if "SLITTER 1" in t: return 1
-            if "SLITTER 2" in t: return 2
-            if "SLITTER 3" in t: return 3
-            if "SPECIAL APPS" in t: return "Special Apps"
-            match = re.search(r'\d+', t)
-            return int(match.group()) if match else val_str
-
         allocations = []
         for c in range(8, 15):
             cell_text = self.model.item(row, c).text()
-            allocations.append(to_numeric_allocation(cell_text))
+            allocations.append(self._to_numeric_allocation(cell_text))
 
         db_ij, db_oj, db_isw, db_osw, db_ext, db_ins, db_sa = allocations
 
@@ -503,6 +558,8 @@ class JobProgressPage(QWidget):
                             """,
                             job_number
                         )
+                elif not current_line:
+                    self._remove_operation_complete(cur, job_number, current_operation)
                 
                 conn.commit()
 
@@ -527,7 +584,10 @@ class JobProgressPage(QWidget):
                 self.table.setRowHidden(row_idx, False)
             return
 
-        tokens = raw_query.split()
+        try:
+            tokens = shlex.split(raw_query)
+        except ValueError:
+            tokens = raw_query.split()
         
         # Field shorthand map matching table column layouts
         alias_map = {
@@ -560,12 +620,13 @@ class JobProgressPage(QWidget):
                             row_match = False
                             break
                     elif key in ("line", "mfg"):
-                        # 'line' modifier cross-scans through allocation cell values (columns 8 to 14)
+                        # 'line' modifier cross-scans allocation cells by exact normalized line value.
                         line_found = False
+                        wanted_line = self._line_key(val)
                         for col_idx in range(8, 15):
                             cell_item = self.model.item(row_idx, col_idx)
-                            cell_text = cell_item.text().lower() if cell_item else ""
-                            if val in cell_text:
+                            cell_text = cell_item.text() if cell_item else ""
+                            if self._line_key(cell_text) == wanted_line:
                                 line_found = True
                                 break
                         if not line_found:
@@ -599,16 +660,36 @@ class JobProgressPage(QWidget):
     # -----------------------------------------------------------------------
     def handle_mass_complete(self):
         """Processes a complete transaction push across all currently filtered/visible items matching line selection criteria."""
-        target_line = self.mass_line_selector.currentText().strip()
         operation_target = self.mass_op_selector.currentData()
+        target_data = self.mass_line_selector.currentData()
+        target_line = "" if target_data is None else str(target_data).strip()
+        if target_data is None:
+            target_line = self.mass_line_selector.currentText().strip()
         
-        if not target_line:
+        if operation_target == "all" and not target_line:
             return
+
+        if operation_target == "all":
+            action_text = (
+                f"batch mark visible jobs that already contain Line '{target_line}' "
+                "in any shop column as Complete"
+            )
+        else:
+            op_name = self.operation_map.get(operation_target, "selected operation")
+            if not target_line:
+                action_text = f"clear {op_name} for all visible rows and remove its Complete flag"
+            elif self._line_key(target_line) == "NR":
+                action_text = f"mark {op_name} as NR for all visible rows without logging completion"
+            else:
+                action_text = (
+                    f"assign Line '{target_line}' to {op_name} for all visible rows "
+                    "and mark that operation Complete"
+                )
 
         confirm = QMessageBox.question(
             self,
             "Confirm Bulk Completion Rollout",
-            f"Are you sure you want to batch mark jobs containing Line '{target_line}' as Complete across the active view selection?",
+            f"Are you sure you want to {action_text}?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if confirm != QMessageBox.StandardButton.Yes:
@@ -617,19 +698,9 @@ class JobProgressPage(QWidget):
         operator_name = self.app.operator.FullName if self.app.operator else "Unknown"
         jobs_processed = 0
 
-        def to_numeric_allocation(val_str: str) -> Optional[Any]:
-            t = val_str.upper().strip()
-            if not t or t == "NONE": return None
-            if t == "NR" or "999" in t: return 999
-            if "SLITTER 1" in t: return 1
-            if "SLITTER 2" in t: return 2
-            if "SLITTER 3" in t: return 3
-            if "SPECIAL APPS" in t: return "Special Apps"
-            match = re.search(r'\d+', t)
-            return int(match.group()) if match else val_str
-
         try:
             self.model.blockSignals(True)
+            self._bulk_update_in_progress = True
             
             with adhoc_connect() as conn:
                 cur = conn.cursor()
@@ -648,24 +719,28 @@ class JobProgressPage(QWidget):
                     except ValueError:
                         continue
 
-                    columns_to_evaluate = list(self.operation_map.keys()) if operation_target == "all" else [operation_target]
-                    line_matched = False
+                    specific_operation = operation_target != "all"
+                    columns_to_evaluate = list(self.operation_map.keys()) if not specific_operation else [operation_target]
                     matched_operations = []
                     
                     for col_idx in columns_to_evaluate:
                         cell_item = self.model.item(row_idx, col_idx)
-                        if cell_item and cell_item.text().strip().lower() == target_line.lower():
-                            line_matched = True
+                        cell_text = cell_item.text() if cell_item else ""
+                        if specific_operation:
+                            if cell_item:
+                                cell_item.setText(target_line)
+                            matched_operations.append((col_idx, self.operation_map[col_idx]))
+                        elif self._line_key(cell_text) == self._line_key(target_line):
                             matched_operations.append((col_idx, self.operation_map[col_idx]))
 
-                    if not line_matched:
+                    if not matched_operations:
                         continue
 
                     allocations = []
                     for c in range(8, 15):
                         cell_item = self.model.item(row_idx, c)
                         cell_text = cell_item.text() if cell_item else ""
-                        allocations.append(to_numeric_allocation(cell_text))
+                        allocations.append(self._to_numeric_allocation(cell_text))
 
                     db_ij, db_oj, db_isw, db_osw, db_ext, db_ins, db_sa = allocations
 
@@ -696,9 +771,17 @@ class JobProgressPage(QWidget):
                         db_ij, db_oj, db_isw, db_osw, db_ext, db_ins
                     )
 
-                    # 2. Add Tracking Logs for each matching column step
+                    logged_complete = False
+
+                    # 2. Add or remove tracking logs for each matching column step
                     for col_idx, op_name in matched_operations:
-                        exec_op = "Special Apps" if target_line == "Special Apps" else op_name
+                        exec_op = "Special Apps" if self._line_key(target_line) == "SPECIAL APPS" else op_name
+                        if not target_line:
+                            self._remove_operation_complete(cur, job_number, exec_op)
+                            continue
+                        if self._line_key(target_line) == "NR":
+                            continue
+
                         cur.execute(
                             """
                             INSERT INTO dbo.JobTracking (
@@ -708,16 +791,18 @@ class JobProgressPage(QWidget):
                             """,
                             operator_name, job_number, target_line, exec_op
                         )
+                        logged_complete = True
 
                     # 3. Finalize core JOBLOG completion timestamps
-                    cur.execute(
-                        """
-                        UPDATE dbo.JOBLOG
-                        SET Date_Completed = CAST(GETDATE() AS date)
-                        WHERE JobNumber = ? AND Date_Completed IS NULL
-                        """,
-                        job_number
-                    )
+                    if logged_complete:
+                        cur.execute(
+                            """
+                            UPDATE dbo.JOBLOG
+                            SET Date_Completed = CAST(GETDATE() AS date)
+                            WHERE JobNumber = ? AND Date_Completed IS NULL
+                            """,
+                            job_number
+                        )
                     
                     jobs_processed += 1
                 
@@ -726,7 +811,7 @@ class JobProgressPage(QWidget):
             QMessageBox.information(
                 self, 
                 "Success", 
-                f"Successfully marked {jobs_processed} operations on Line {target_line} as Complete."
+                f"Successfully updated {jobs_processed} visible jobs for Line {target_line}."
             )
 
         except Exception as err:
@@ -736,5 +821,6 @@ class JobProgressPage(QWidget):
                 f"Failed to post bulk updates out to storage:\n\n{str(err)}"
             )
         finally:
+            self._bulk_update_in_progress = False
             self.model.blockSignals(False)
             QTimer.singleShot(0, self.refresh)

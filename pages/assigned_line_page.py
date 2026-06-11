@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QFrame,
     QAbstractItemView
 )
@@ -13,6 +12,8 @@ from database import adhoc_connect
 from config import APP_TITLE
 from widgets.table_panel import TablePanel
 from helpers import app_date_text
+from constants import shipped_special_apps_filter
+from ui_components import add_header_row, add_session_row, action_button
 
 class AssignedLinePage(QWidget):
     def __init__(self, app):
@@ -21,55 +22,16 @@ class AssignedLinePage(QWidget):
         self.setObjectName("root")
 
         # --- Interactive Control Elements ---
-        refresh_btn = QPushButton("Refresh Data")
-        refresh_btn.setMinimumHeight(40)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh)
-
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(lambda: self.app.navigate("Home"))
+        refresh_btn = action_button("Refresh Data", self.refresh)
+        home_btn = action_button("Home Menu", lambda: self.app.navigate("Home"))
 
         # --- Master Layout Assembly ---
         master_layout = QVBoxLayout(self)
         master_layout.setContentsMargins(24, 24, 24, 24)
         master_layout.setSpacing(20)
 
-        # --- SESSION BANNER ---
-        top_bar = QHBoxLayout()
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner { background-color: #E8650A; border-radius: 8px; }
-            QLabel { color: #000000; font-weight: 800; font-size: 13px; background: transparent; border: none; }
-            QPushButton { background: rgba(255, 255, 255, 0.22); color: white; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; padding: 6px 14px; font-weight: 700; }
-            QPushButton:hover { background: rgba(255, 255, 255, 0.35); }
-        """)
-
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        session_layout.setSpacing(15)
-
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        session_layout.addWidget(QLabel(f"Logged in as: {name_str}"))
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-        session_layout.addWidget(logout_btn)
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        master_layout.addLayout(top_bar)
-
-        # --- HEADER CONTROL RACK ---
-        header_rack = QHBoxLayout()
-        page_title = QLabel("Assigned Production Tracking")
-        page_title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        header_rack.addWidget(page_title)
-        header_rack.addStretch()
-        header_rack.addWidget(refresh_btn)
-        header_rack.addWidget(home_btn)
-        master_layout.addLayout(header_rack)
+        add_session_row(master_layout, self.app)
+        add_header_row(master_layout, "Assigned Production Tracking", refresh_btn, home_btn)
 
         # --- OPERATIONAL SUMMARY KPI CARD ---
         self.kpi_card = QFrame()
@@ -96,7 +58,7 @@ class AssignedLinePage(QWidget):
         try:
             # The filter logic has been added to the WHERE clause to exclude 
             # rows where specific columns are NULL, empty, or 0.
-            sql = """
+            sql = f"""
                 SELECT j.PalletNumber, j.JobNumber, j.Customer, j.Diameter, j.Thickness, 
                        j.Length, j.ShipBy, m.InnerJoinMFG, m.OuterJoinMFG, 
                        m.InnerSewMFG, m.OuterSewMFG, m.ExtrusionMFG, m.InspectionMFG
@@ -104,6 +66,7 @@ class AssignedLinePage(QWidget):
                 INNER JOIN dbo.JobEntry_MFGLine m ON j.JobNumber = m.JobNumber
                 WHERE j.Length IS NOT NULL AND j.Length <> ''
                 AND j.ShipBy >= DATEADD(week, DATEDIFF(week, 0, GETDATE()), 0)
+                AND {shipped_special_apps_filter("j.JobNumber")}
                 -- Only show jobs where these 3 columns are fully filled (Not Null, Not Empty, Not 0)
                 AND (m.InnerSewMFG IS NOT NULL AND m.InnerSewMFG <> '' AND m.InnerSewMFG <> 0)
                 AND (m.OuterSewMFG IS NOT NULL AND m.OuterSewMFG <> '' AND m.OuterSewMFG <> 0)

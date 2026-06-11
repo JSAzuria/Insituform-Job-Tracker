@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QMessageBox,
     QLabel,
-    QPushButton,
     QFrame
 )
 from PyQt6.QtCore import Qt
@@ -16,6 +15,7 @@ from database import adhoc_connect
 from config import APP_TITLE
 from constants import TRACKING_PROCESS_OPTIONS
 from helpers import as_int_or_none
+from ui_components import add_header_row, add_session_row, action_button
 
 class JobTrackingPage(QWidget):
     def __init__(self, app):
@@ -51,94 +51,22 @@ class JobTrackingPage(QWidget):
         self.line.currentTextChanged.connect(self.on_line_changed)
 
         # Process Operations Control Stack
-        start_btn = QPushButton("Start Job Process")
-        start_btn.setProperty("accent", True)  # Adopts dynamic green/orange branding
-        start_btn.setMinimumHeight(46)
-        start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        start_btn.clicked.connect(lambda: self.save_event("Active"))
-        
-        stop_btn = QPushButton("Stop / Complete")
-        stop_btn.setMinimumHeight(46)
-        stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        stop_btn.clicked.connect(lambda: self.save_event("Complete"))
-
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(lambda: self.app.navigate("Home"))
+        start_btn = action_button(
+            "Start Job Process",
+            lambda: self.save_event("Active"),
+            accent=True,
+            height=46,
+        )
+        stop_btn = action_button("Stop / Complete", lambda: self.save_event("Complete"), height=46)
+        home_btn = action_button("Home Menu", lambda: self.app.navigate("Home"))
 
         # --- Master Layout Assembly ---
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(24, 24, 24, 24)
         main_layout.setSpacing(20)
 
-        # --------------------------------------------------
-        # TOP ROW: CONTEXTUAL USER SESSION BANNER (RIGHT-ALIGNED)
-        # --------------------------------------------------
-        top_bar = QHBoxLayout()
-
-        # Orange Session Framework Container (Anchored Top-Right)
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner {
-                background-color: #E8650A;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #000000;
-                font-weight: 800;
-                font-size: 13px;
-                background: transparent;
-                border: none;
-            }
-            QPushButton {
-                background: rgba(255, 255, 255, 0.22);
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.4);
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 700;
-            }
-            QPushButton:hover {
-                background: rgba(255, 255, 255, 0.35);
-            }
-        """)
-
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        session_layout.setSpacing(15)
-
-        op_name = "Operator"
-        if self.app.operator and hasattr(self.app.operator, "FullName"):
-            op_name = self.app.operator.FullName
-
-        user_label = QLabel(f"Logged in as: {op_name}")
-        
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-
-        session_layout.addWidget(user_label)
-        session_layout.addWidget(logout_btn)
-        
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        main_layout.addLayout(top_bar)
-
-        # --------------------------------------------------
-        # HEADER CONTROL RACK (Title & Global Actions)
-        # --------------------------------------------------
-        header_rack = QHBoxLayout()
-        
-        page_title = QLabel("Floor Operations Tracking")
-        page_title.setObjectName("sectionTitle")
-        page_title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        
-        header_rack.addWidget(page_title)
-        header_rack.addStretch()
-        header_rack.addWidget(home_btn)
-        main_layout.addLayout(header_rack)
+        add_session_row(main_layout, self.app)
+        add_header_row(main_layout, "Floor Operations Tracking", home_btn)
 
         # --------------------------------------------------
         # CENTER CARD: SYSTEM INTERACTIVE PORTAL HUB
@@ -328,6 +256,21 @@ class JobTrackingPage(QWidget):
                         APP_TITLE, 
                         f"Warning: Job #{job_number} does not exist in the master database log. Process aborted."
                     )
+                    return
+
+                shipped_check = cur.execute(
+                    """
+                    SELECT 1
+                    FROM dbo.JobTracking
+                    WHERE JobNumber = ?
+                      AND LTRIM(RTRIM(Operation)) = 'Special Apps'
+                      AND EventType = 'Complete'
+                    """,
+                    job_number
+                ).fetchone()
+
+                if shipped_check:
+                    QMessageBox.warning(self, APP_TITLE, "Job already marked as Shipped.")
                     return
 
                 dup = cur.execute(

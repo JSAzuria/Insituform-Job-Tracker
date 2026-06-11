@@ -83,15 +83,19 @@ INSPECTION_OPTIONS = ["1", "2", "12", "14", "15"]
 EDW_JOBLOG_VIEW = "dbo.vw_Dim_JOBLOG_Creation"
 
 # Query injection filter used across job log tracking grid matrices
-ACTIVE_JOBTRACKING_FILTER = """
+def shipped_special_apps_filter(job_number_expr: str = "j.JobNumber") -> str:
+    return f"""
     NOT EXISTS (
         SELECT 1
         FROM dbo.JobTracking jt
-        WHERE jt.JobNumber = CONVERT(nvarchar(50), j.JobNumber)
-          AND jt.Operation  = 'Special Apps'
-          AND jt.EventType  = 'Complete'
+        WHERE jt.JobNumber = CONVERT(nvarchar(50), {job_number_expr})
+          AND LTRIM(RTRIM(jt.Operation)) = 'Special Apps'
+          AND jt.EventType = 'Complete'
     )
 """
+
+
+ACTIVE_JOBTRACKING_FILTER = shipped_special_apps_filter()
 
 
 # ==============================================================================

@@ -3,7 +3,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, 
     QHBoxLayout, 
     QLabel, 
-    QPushButton, 
     QMessageBox,
     QFrame,
     QAbstractItemView,
@@ -13,6 +12,7 @@ from PyQt6.QtCore import Qt
 from widgets.table_panel import TablePanel
 from database import adhoc_connect
 from config import APP_TITLE
+from ui_components import add_header_row, add_session_row, action_button
 
 class HeadcountPage(QWidget):
     def __init__(self, app):
@@ -38,51 +38,16 @@ class HeadcountPage(QWidget):
         self.shift_filter.setMinimumHeight(30)
         self.shift_filter.currentIndexChanged.connect(self.refresh)
 
-        refresh_btn = QPushButton("Refresh Data")
-        refresh_btn.setMinimumHeight(40)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh)
-        
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(lambda: self.app.navigate("Home"))
+        refresh_btn = action_button("Refresh Data", self.refresh)
+        home_btn = action_button("Home Menu", lambda: self.app.navigate("Home"))
 
         # --- LAYOUTS ---
         master_layout = QVBoxLayout(self)
         master_layout.setContentsMargins(24, 24, 24, 24)
         master_layout.setSpacing(20)
 
-        # --- SESSION BANNER ---
-        top_bar = QHBoxLayout()
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner { background-color: #E8650A; border-radius: 8px; }
-            QLabel { color: #000000; font-weight: 800; font-size: 13px; background: transparent; }
-            QPushButton { background: rgba(255, 255, 255, 0.22); color: white; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; padding: 6px 14px; font-weight: 700; }
-            QPushButton:hover { background: rgba(255, 255, 255, 0.35); }
-        """)
-        
-        session_layout = QHBoxLayout(session_frame)
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        session_layout.addWidget(QLabel(f"Logged in as: {name_str}"))
-        logout_btn = QPushButton("Logout")
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-        session_layout.addWidget(logout_btn)
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        master_layout.addLayout(top_bar)
-
-        # --- HEADER ---
-        header_rack = QHBoxLayout()
-        title = QLabel("Personnel Roster Management")
-        title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        header_rack.addWidget(title)
-        header_rack.addStretch()
-        header_rack.addWidget(refresh_btn)
-        header_rack.addWidget(home_btn)
-        master_layout.addLayout(header_rack)
+        add_session_row(master_layout, self.app)
+        add_header_row(master_layout, "Personnel Roster Management", refresh_btn, home_btn)
 
         # --- KPI CARD ---
         self.kpi_card = QFrame()
@@ -92,11 +57,11 @@ class HeadcountPage(QWidget):
         kpi_layout.setContentsMargins(25, 0, 25, 0)
         kpi_layout.setSpacing(20)
         
-        self.counter_label = QLabel("Total: —")
-        self.budget_label = QLabel("Sewing Budget: —") # Renamed from sewing_label
-        self.small_label = QLabel("Small: —")
-        self.large_label = QLabel("Large: —")
-        self.slitter_label = QLabel("Slitter: —")
+        self.counter_label = QLabel("Total: --")
+        self.budget_label = QLabel("Sewing Budget: --")
+        self.small_label = QLabel("Small: --")
+        self.large_label = QLabel("Large: --")
+        self.slitter_label = QLabel("Slitter: --")
         
         # Add metric widgets to KPI
         labels = [self.counter_label, self.budget_label, self.small_label, self.large_label, self.slitter_label]

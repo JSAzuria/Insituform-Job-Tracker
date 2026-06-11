@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QMessageBox,
     QHeaderView,
-    QPushButton,
     QLabel,
     QFrame,
     QLineEdit,
@@ -30,7 +29,13 @@ from constants import (
     OUTER_SEW_OPTIONS,
     EXTRUSION_OPTIONS,
     INSPECTION_OPTIONS,
+    shipped_special_apps_filter,
 )
+from ui_components import add_header_row, add_session_row, action_button
+
+ALLOCATION_COLUMN_WIDTH = 132
+ALLOCATION_ROW_HEIGHT = 54
+ALLOCATION_COMBO_HEIGHT = 38
 
 # ---------------------------------------------------------------------------
 # LINE SUGGESTION ENGINE
@@ -352,7 +357,8 @@ class AssignLinePage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.verticalHeader().setMinimumSectionSize(ALLOCATION_ROW_HEIGHT)
+        self.table.verticalHeader().setDefaultSectionSize(ALLOCATION_ROW_HEIGHT)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStyleSheet("font-weight: bold; color: #333333;")
 
@@ -374,99 +380,43 @@ class AssignLinePage(QWidget):
         self._last_rows: list = []
 
         # --- Buttons ---
-        refresh_btn = QPushButton("Refresh Data")
-        refresh_btn.setMinimumHeight(40)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh)
+        refresh_btn = action_button("Refresh Data", self.refresh)
+        home_btn = action_button("Home Menu", self.app.show_role_home)
 
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(self.app.show_role_home)
-
-        suggest_btn = QPushButton("⚡ Suggest Lines")
+        suggest_btn = action_button("Suggest Lines", self.apply_suggestions)
         suggest_btn.setToolTip(
             "Auto-fills blank allocation combos using diameter / thickness / length / DESC rules.\n"
-            "Only blank cells are touched — existing assignments are never overwritten.\n\n"
-            "FLEXSEAM (Dia ≤12, Thick <10, Len >1000) → Sew: Line 10 or 6 | Ext: NR\n"
-            "EXT      (Dia ≤15, Thick <10, Len >1000) → Sew: Line 7 or 6  | Ext: 3\n"
+            "Only blank cells are touched; existing assignments are never overwritten.\n\n"
+            "FLEXSEAM (Dia <= 12, Thick < 10, Len > 1000) -> Sew: Line 10 or 6 | Ext: NR\n"
+            "EXT      (Dia <= 15, Thick < 10, Len > 1000) -> Sew: Line 7 or 6  | Ext: 3\n"
             "InnerJoin / OuterJoin always set to NR.\n"
             "Inspection alternates 1 / 2 across the batch."
         )
-        suggest_btn.setMinimumHeight(40)
-        suggest_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        suggest_btn.clicked.connect(self.apply_suggestions)
 
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText(
-            "Search jobs by Pallet, Job #, Diameter, Thickness, Length, or Date…  "
+            "Search jobs by Pallet, Job #, Diameter, Thickness, Length, or Date...  "
             "e.g. D=8 T=16.5"
         )
         self.search_bar.setClearButtonEnabled(True)
         self.search_bar.setMinimumHeight(38)
         self.search_bar.textChanged.connect(self.filter_table)
 
-        save_btn = QPushButton("Save Allocations")
-        save_btn.setProperty("accent", True)
-        save_btn.setMinimumHeight(45)
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.clicked.connect(self.save)
+        save_btn = action_button("Save Allocations", self.save, accent=True, height=45)
 
         # --- Master Layout ---
         master_layout = QVBoxLayout(self)
         master_layout.setContentsMargins(24, 24, 24, 24)
         master_layout.setSpacing(20)
 
-        # Session banner
-        top_bar = QHBoxLayout()
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner {
-                background-color: #E8650A;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #000000;
-                font-weight: 800;
-                font-size: 13px;
-                background: transparent;
-                border: none;
-            }
-            QPushButton {
-                background: rgba(255,255,255,0.22);
-                color: white;
-                border: 1px solid rgba(255,255,255,0.4);
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 700;
-            }
-            QPushButton:hover { background: rgba(255,255,255,0.35); }
-        """)
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        session_layout.setSpacing(15)
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        session_layout.addWidget(QLabel(f"Logged in as: {name_str}"))
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-        session_layout.addWidget(logout_btn)
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        master_layout.addLayout(top_bar)
-
-        # Header rack
-        header_rack = QHBoxLayout()
-        page_title = QLabel("Manufacturing Line Allocation")
-        page_title.setObjectName("sectionTitle")
-        page_title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        header_rack.addWidget(page_title)
-        header_rack.addStretch()
-        header_rack.addWidget(suggest_btn)
-        header_rack.addWidget(refresh_btn)
-        header_rack.addWidget(home_btn)
-        master_layout.addLayout(header_rack)
+        add_session_row(master_layout, self.app)
+        add_header_row(
+            master_layout,
+            "Manufacturing Line Allocation",
+            suggest_btn,
+            refresh_btn,
+            home_btn,
+        )
 
         # KPI card
         self.kpi_card = QFrame()
@@ -556,6 +506,7 @@ class AssignLinePage(QWidget):
                     WHERE j.Date_Completed IS NULL
                       AND j.Length IS NOT NULL AND j.Length <> ''
                       AND j.ShipBy >= CONVERT(DATE, GETDATE())
+                      AND {shipped_special_apps_filter("j.JobNumber")}
                       AND (
                           m.JobNumber     IS NULL
                           OR m.InnerSewMFG   IS NULL OR m.InnerSewMFG   = ''
@@ -626,7 +577,9 @@ class AssignLinePage(QWidget):
                 self._add_combo(r, 11, OUTER_SEW_OPTIONS,  osw_init)
                 self._add_combo(r, 12, EXTRUSION_OPTIONS,  ext_init)
                 self._add_combo(r, 13, INSPECTION_OPTIONS, ins_init)
+                self.table.setRowHeight(r, ALLOCATION_ROW_HEIGHT)
 
+            self._size_allocation_columns()
             self.kpi_val.setText(str(len(rows)))
             self._ensure_sorting_hook()
 
@@ -689,8 +642,8 @@ class AssignLinePage(QWidget):
             alloc = suggestions[job_no]
 
             for col_idx, field_name in col_field_map.items():
-                combo = self.table.indexWidget(self.model.index(model_row, col_idx))
-                if not isinstance(combo, QComboBox):
+                combo = self._combo_widget(model_row, col_idx)
+                if combo is None:
                     continue
 
                 current_val = combo.currentText().strip()
@@ -725,13 +678,47 @@ class AssignLinePage(QWidget):
         combo = QComboBox()
         combo.addItems([""] + [str(o) for o in options])
         combo.setCurrentText("" if current is None else str(current))
-        combo.setMinimumHeight(28)
-        self.table.setIndexWidget(self.model.index(row, col), combo)
+        combo.setFixedHeight(ALLOCATION_COMBO_HEIGHT)
+        combo.setMinimumWidth(104)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px 28px 4px 10px;
+                margin: 0;
+            }
+            QComboBox::drop-down {
+                width: 24px;
+            }
+        """)
 
-    def _combo_value(self, row: int, col: int) -> Optional[str]:
+        cell = QWidget()
+        cell.setObjectName("combo_cell")
+        cell.setStyleSheet("QWidget#combo_cell { background: transparent; }")
+        layout = QHBoxLayout(cell)
+        layout.setContentsMargins(5, 7, 5, 7)
+        layout.setSpacing(0)
+        layout.addWidget(combo)
+
+        self.table.setIndexWidget(self.model.index(row, col), cell)
+
+    def _size_allocation_columns(self):
+        header = self.table.horizontalHeader()
+        for col in range(8, 14):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            header.resizeSection(col, ALLOCATION_COLUMN_WIDTH)
+
+    def _combo_widget(self, row: int, col: int) -> Optional[QComboBox]:
         widget = self.table.indexWidget(self.model.index(row, col))
         if isinstance(widget, QComboBox):
-            val = widget.currentText().strip()
+            return widget
+        if isinstance(widget, QWidget):
+            return widget.findChild(QComboBox)
+        return None
+
+    def _combo_value(self, row: int, col: int) -> Optional[str]:
+        combo = self._combo_widget(row, col)
+        if combo is not None:
+            val = combo.currentText().strip()
             return None if val == "" else val
         return None
 

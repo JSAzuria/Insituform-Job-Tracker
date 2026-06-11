@@ -6,11 +6,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, 
     QHBoxLayout, 
     QFrame, 
-    QLabel, 
-    QPushButton
+    QLabel
 )
 from PyQt6.QtCore import Qt
 from config import APP_TITLE
+from ui_components import add_session_row, action_button
 
 
 class MenuPage(QWidget):
@@ -24,62 +24,7 @@ class MenuPage(QWidget):
         main_layout.setContentsMargins(24, 24, 24, 24)
         main_layout.setSpacing(20)
 
-        # --------------------------------------------------
-        # TOP ROW: CONTEXTUAL USER SESSION BANNER (RIGHT-ALIGNED)
-        # --------------------------------------------------
-        top_bar = QHBoxLayout()
-
-        # Orange Session Framework Container (Anchored Top-Right)
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner {
-                background-color: #E8650A;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #000000;
-                font-weight: 800;
-                font-size: 13px;
-                background: transparent;
-                border: none;
-            }
-            QPushButton {
-                background: rgba(255, 255, 255, 0.22);
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.4);
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 700;
-            }
-            QPushButton:hover {
-                background: rgba(255, 255, 255, 0.35);
-            }
-        """)
-
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        session_layout.setSpacing(15)
-
-        # Safely capture signed-in routing states
-        op_name = "Operator"
-        if self.app.operator and hasattr(self.app.operator, "FullName"):
-            op_name = self.app.operator.FullName
-
-        user_label = QLabel(f"Logged in as: {op_name}")
-        
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-
-        # Add session container components
-        session_layout.addWidget(user_label)
-        session_layout.addWidget(logout_btn)
-        
-        # Position banner cleanly along the right margin
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        main_layout.addLayout(top_bar)
+        add_session_row(main_layout, self.app)
 
         # --------------------------------------------------
         # CENTER CARD: SYSTEM INTERACTIVE PORTAL HUB
@@ -134,13 +79,8 @@ class MenuPage(QWidget):
 
         # Mount target entries systematically across a 2-column grid distribution block
         for i, name in enumerate(pages):
-            btn = QPushButton(name)
+            btn = action_button(name, lambda _, n=name: self.app.navigate(n), height=50)
             btn.setObjectName("menu_navigation_button")  # Stylesheet target hook
-            btn.setMinimumHeight(48)                      # Robust clickable footprint on shop terminals
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            
-            # Safely capture variable scope states at evaluation execution phase
-            btn.clicked.connect(lambda _, n=name: self.app.navigate(n))
             
             row = i // 2
             col = i % 2

@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QDateEdit,
     QMessageBox,
     QLabel,
-    QPushButton,
     QFrame,
     QGridLayout,
     QDialog,
@@ -21,6 +20,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QDate, Qt
 from database import adhoc_connect
 from config import APP_TITLE
+from ui_components import add_header_row, add_session_row, action_button
 
 class EmployeePage(QWidget):
     def __init__(self, app):
@@ -59,68 +59,17 @@ class EmployeePage(QWidget):
         self.active.setMinimumHeight(30)
 
         # Action Buttons
-        load_btn = QPushButton("Load Employee")
-        load_btn.setMinimumHeight(40)
-        load_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        load_btn.clicked.connect(self.load_employee)
-
-        save_btn = QPushButton("Save Employee")
-        save_btn.setMinimumHeight(45)
-        save_btn.setProperty("accent", True)
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.clicked.connect(self.save_employee)
-
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(45)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(lambda: self.app.navigate("Home"))
+        load_btn = action_button("Load Employee", self.load_employee)
+        save_btn = action_button("Save Employee", self.save_employee, accent=True, height=45)
+        home_btn = action_button("Home Menu", lambda: self.app.navigate("Home"), height=45)
 
         # --- Master Layout Assembly ---
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(24, 24, 24, 24)
         main_layout.setSpacing(20)
 
-        # --- SESSION BANNER ---
-        top_bar = QHBoxLayout()
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner {
-                background-color: #E8650A;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #000000;
-                font-weight: 800;
-                font-size: 13px;
-                background: transparent;
-                border: none;
-            }
-            QPushButton {
-                background: rgba(255, 255, 255, 0.22);
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.4);
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 700;
-            }
-            QPushButton:hover {
-                background: rgba(255, 255, 255, 0.35);
-            }
-        """)
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        session_layout.setSpacing(15)
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        user_label = QLabel(f"Logged in as: {name_str}")
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-        session_layout.addWidget(user_label)
-        session_layout.addWidget(logout_btn)
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        main_layout.addLayout(top_bar)
+        add_session_row(main_layout, self.app)
+        add_header_row(main_layout, "Employee Management", home_btn)
 
         main_layout.addStretch(1)
 
@@ -144,9 +93,12 @@ class EmployeePage(QWidget):
         search_frame = QFrame()
         search_frame.setStyleSheet("""
             QFrame {
-                background-color: #F5F5F5;
-                border-radius: 8px;
-                border: 1px solid #E0E0E0;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255,255,255,215),
+                    stop:1 rgba(221,237,249,178));
+                border-radius: 10px;
+                border: 1px solid rgba(112,154,194,145);
+                border-top: 1px solid rgba(255,255,255,230);
             }
             QLabel { background: transparent; border: none; }
         """)
@@ -214,7 +166,6 @@ class EmployeePage(QWidget):
 
         # --- Footer ---
         footer = QHBoxLayout()
-        footer.addWidget(home_btn)
         footer.addStretch(1)
         footer.addWidget(save_btn)
         card_layout.addLayout(footer)

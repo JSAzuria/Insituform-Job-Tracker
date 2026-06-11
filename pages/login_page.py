@@ -7,12 +7,12 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QLabel,
-    QPushButton,
     QFrame
 )
 from PyQt6.QtCore import Qt
 from database import adhoc_connect
 from config import APP_TITLE
+from ui_components import action_button
 
 class LoginPage(QWidget):
     def __init__(self, app):
@@ -26,12 +26,9 @@ class LoginPage(QWidget):
         self.badge.setMinimumHeight(42)
         self.badge.setClearButtonEnabled(True)
 
-        submit = QPushButton("Log In / Submit")
-        submit.setMinimumHeight(45)
-        submit.setCursor(Qt.CursorShape.PointingHandCursor)
+        submit = action_button("Log In / Submit", self.login, accent=True, height=45)
         
         # Wire events
-        submit.clicked.connect(self.login)
         self.badge.returnPressed.connect(self.login)
 
         # --- Centered Card Panel Container ---

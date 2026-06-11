@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QMessageBox,
     QLabel,
-    QPushButton,
     QFrame
 )
 from PyQt6.QtCore import Qt
@@ -16,6 +15,7 @@ from database import adhoc_connect
 from config import APP_TITLE
 from helpers import as_int_or_none
 from constants import PROCESS_OPTIONS
+from ui_components import add_header_row, add_session_row, action_button
 
 class UpdateLocationPage(QWidget):
     def __init__(self, app):
@@ -35,7 +35,7 @@ class UpdateLocationPage(QWidget):
         # Standardized production line selection configuration
         self.line_selector = QComboBox()
         self.line_selector.addItems([
-            "Slitter 1", "Slitter 2", "Slitter 3", "4", "5",
+            "PC", "Slitter 1", "Slitter 2", "Slitter 3", "1", "2", "3", "4", "5",
             "6", "7", "9", "10", "11",
             "12", "13", "14", "15", "17",
             "Special Apps"
@@ -51,85 +51,16 @@ class UpdateLocationPage(QWidget):
         self.status.setMinimumHeight(38)
 
         # --- Action Buttons ---
-        save_btn = QPushButton("Save Transaction")
-        save_btn.setMinimumHeight(45)
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.clicked.connect(self.save)
-        
-        home_btn = QPushButton("Home Menu")
-        home_btn.setMinimumHeight(40)
-        home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        home_btn.clicked.connect(lambda: self.app.navigate("Home"))
+        save_btn = action_button("Save Transaction", self.save, accent=True, height=45)
+        home_btn = action_button("Home Menu", lambda: self.app.navigate("Home"))
 
         # --- Master Layout Assembly ---
         master_layout = QVBoxLayout(self)
         master_layout.setContentsMargins(24, 24, 24, 24)
         master_layout.setSpacing(20)
 
-        # --------------------------------------------------
-        # TOP ROW: CONTEXTUAL USER SESSION BANNER (RIGHT-ALIGNED)
-        # --------------------------------------------------
-        top_bar = QHBoxLayout()
-
-        # Orange Session Framework Container
-        session_frame = QFrame()
-        session_frame.setObjectName("session_banner")
-        session_frame.setStyleSheet("""
-            QFrame#session_banner {
-                background-color: #E8650A;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #000000;
-                font-weight: 800;
-                font-size: 13px;
-                background: transparent;
-                border: none;
-            }
-            QPushButton {
-                background: rgba(255, 255, 255, 0.22);
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.4);
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 700;
-            }
-            QPushButton:hover {
-                background: rgba(255, 255, 255, 0.35);
-            }
-        """)
-
-        session_layout = QHBoxLayout(session_frame)
-        session_layout.setContentsMargins(15, 8, 15, 8)
-        session_layout.setSpacing(15)
-
-        name_str = self.app.operator.FullName if self.app.operator else "Unknown"
-        user_label = QLabel(f"Logged in as: {name_str}")
-        
-        logout_btn = QPushButton("Logout")
-        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_btn.clicked.connect(lambda: self.app.navigate("Logout"))
-
-        session_layout.addWidget(user_label)
-        session_layout.addWidget(logout_btn)
-        
-        top_bar.addStretch()
-        top_bar.addWidget(session_frame)
-        master_layout.addLayout(top_bar)
-
-        # --------------------------------------------------
-        # HEADER CONTROL RACK (Title & Global Actions)
-        # --------------------------------------------------
-        header_rack = QHBoxLayout()
-        
-        page_title = QLabel("Tracking & Location Manager")
-        page_title.setObjectName("sectionTitle")
-        page_title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        
-        header_rack.addWidget(page_title)
-        header_rack.addStretch()
-        header_rack.addWidget(home_btn)
-        master_layout.addLayout(header_rack)
+        add_session_row(master_layout, self.app)
+        add_header_row(master_layout, "Tracking & Location Manager", home_btn)
 
         # --------------------------------------------------
         # CENTERED FORM CARD PANEL (Flat Glass Card)
@@ -241,6 +172,23 @@ class UpdateLocationPage(QWidget):
                         f"Job Number {job_number} not found.\n\n"
                         "This record does not exist within the central database log tracking registry."
                     )
+                    self.job_input.selectAll()
+                    self.job_input.setFocus()
+                    return
+
+                shipped_check = cur.execute(
+                    """
+                    SELECT 1
+                    FROM dbo.JobTracking
+                    WHERE JobNumber = ?
+                      AND LTRIM(RTRIM(Operation)) = 'Special Apps'
+                      AND EventType = 'Complete'
+                    """,
+                    job_number
+                ).fetchone()
+
+                if shipped_check:
+                    QMessageBox.warning(self, APP_TITLE, "Job already marked as Shipped.")
                     self.job_input.selectAll()
                     self.job_input.setFocus()
                     return
